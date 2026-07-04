@@ -1,0 +1,167 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import type { MonitorWorkerEvent } from "../../core/types/monitor-rpc";
+import type {
+  ClusterHealthSnapshot,
+  ConnectClusterInput,
+  ConnectClusterResult,
+  Incident,
+  MonitorEvent,
+} from "../../core/types/monitoring";
+import type { NetworkSnapshot } from "../../core/types/network";
+import { loadClusterConfig } from "../../core/config/cluster-config";
+import { getMonitorWorker } from "../../lib/monitor-rpc";
+
+const EMPTY_NETWORK: NetworkSnapshot = {
+  topology: { nodes: [], edges: [], updatedAt: "" },
+  flows: [],
+  ebpf: { connected: false, collectorUrl: "", message: "offline" },
+};
+
+const EMPTY_HEALTH: ClusterHealthSnapshot = {
+  health: "disconnected",
+  connected: false,
+  clusterName: "disconnected",
+  podCount: 0,
+  runningPods: 0,
+  failedPods: 0,
+  serviceCount: 0,
+  openIncidents: 0,
+  eventsPerMinute: 0,
+};
+
+export function useMonitor() {
+  const worker = useMemo(() => getMonitorWorker(), []);
+  const [events, setEvents] = useState<MonitorEvent[]>([]);
+  const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [health, setHealth] = useState<ClusterHealthSnapshot>(EMPTY_HEALTH);
+  const [connection, setConnection] = useState<ConnectClusterResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [network, setNetwork] = useState<NetworkSnapshot>(EMPTY_NETWORK);
+  const [namespaces, setNamespaces] = useState<string[]>([]);
+
+  useEffect(() => {
+    const unsubscribe = worker.onEvent((event: MonitorWorkerEvent) => {
+      switch (event.type) {
+        case "CONNECTED":
+          setConnection(event.result);
+          setError(null);
+          setBusy(false);
+          break;
+        case "DISCONNECTED":
+          setConnection(null);
+          break;
+        case "MONITOR_EVENT":
+          setEvents((prev) => {
+            const filtered = prev.filter((item) => item.id !== event.event.id);
+            return [event.event, ...filtered].slice(0, 300);
+          });
+          break;
+        case "INCIDENT_UPSERTED":
+          setIncidents((prev) => {
+            const filtered = prev.filter((item) => item.id !== event.incident.id);
+            return [event.incident, ...filtered];
+          });
+          break;
+        case "INCIDENT_RESOLVED":
+          setIncidents((prev) =>
+            prev.map((item) =>
+              item.id === event.incidentId
+                ? { ...item, status: "resolved", updatedAt: new Date().toISOString() }
+                : item,
+            ),
+          );
+          break;
+        case "HEALTH_UPDATE":
+          setHealth(event.snapshot);
+          break;
+        case "MONITOR_SNAPSHOT":
+          setEvents(event.events);
+          setIncidents(event.incidents);
+          break;
+        case "NETWORK_SNAPSHOT":
+          setNetwork(event.snapshot);
+          break;
+        case "NAMESPACES_UPDATE":
+          setNamespaces(event.namespaces);
+          break;
+        case "ERROR":
+          setError(event.message);
+          break;
+      }
+    });
+
+    const config = loadClusterConfig();
+    worker
+      .request({
+        type: "SET_ORIGIN",
+        origin: window.location.origin,
+        ebpfCollectorUrl: config.ebpfCollectorUrl,
+      })
+      .then(() => worker.subscribe())
+      .catch((err: Error) => setError(err.message));
+    return unsubscribe;
+  }, [worker]);
+
+  const connect = useCallback(
+    async (input: ConnectClusterInput) => {
+      setBusy(true);
+      setError(null);
+      try {
+        const result = await worker.request<ConnectClusterResult>({ type: "CONNECT", input });
+        setConnection(result);
+        return result;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to connect";
+        setError(message);
+        throw err;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [worker],
+  );
+
+  const disconnect = useCallback(async () => {
+    setBusy(true);
+    try {
+      await worker.request({ type: "DISCONNECT" });
+      setConnection(null);
+    } finally {
+      setBusy(false);
+    }
+  }, [worker]);
+
+  const resolveIncident = useCallback(
+    async (incidentId: string) => {
+      await worker.request({ type: "RESOLVE_INCIDENT", incidentId });
+    },
+    [worker],
+  );
+
+  const openIncidents = useMemo(
+    () => incidents.filter((incident) => incident.status === "open"),
+    [incidents],
+  );
+
+  const networkEvents = useMemo(
+    () => events.filter((event) => event.category === "network" || event.category === "service"),
+    [events],
+  );
+
+  return {
+    events,
+    incidents,
+    openIncidents,
+    networkEvents,
+    network,
+    namespaces,
+    health,
+    connection,
+    error,
+    busy,
+    connect,
+    disconnect,
+    resolveIncident,
+  };
+}
