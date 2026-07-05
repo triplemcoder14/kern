@@ -1,6 +1,21 @@
 import { useMemo, useState } from "react";
-import type { MonitorEvent, MonitorSeverity } from "../../core/types/monitoring";
+import type { MonitorEvent, MonitorSeverity, NetworkTalkKind } from "../../core/types/monitoring";
+import { useNetworkTalkAlertSound } from "../hooks/useNetworkTalkAlertSound";
+import { isAlertSoundMuted, setAlertSoundMuted, unlockAlertSound } from "../lib/alert-sound";
 import { PageContextBar } from "./PageContextBar";
+
+type SourceFilter = "all" | "kubernetes" | "network" | "degradation";
+
+function isServiceTalkIssue(event: MonitorEvent): boolean {
+  if (!event.networkTalk) {
+    return false;
+  }
+  return (
+    event.networkTalk.kind === "degraded" ||
+    event.severity === "warning" ||
+    event.severity === "critical"
+  );
+}
 
 function formatTime(timestamp: string): string {
   return new Date(timestamp).toLocaleTimeString([], {
@@ -31,6 +46,17 @@ function severityLabel(severity: MonitorSeverity): string {
   }
   return "INF";
 }
+
+function talkKindLabel(kind: NetworkTalkKind): string {
+  if (kind === "started") {
+    return "START";
+  }
+  if (kind === "degraded") {
+    return "DEG";
+  }
+  return "END";
+}
+
 interface LiveEventStreamProps {
   events: MonitorEvent[];
   clusterName: string;
@@ -54,6 +80,10 @@ export function LiveEventStream({
 }: LiveEventStreamProps) {
   const [search, setSearch] = useState("");
   const [severityFilter, setSeverityFilter] = useState<MonitorSeverity | "all">("all");
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
+  const [soundMuted, setSoundMuted] = useState(isAlertSoundMuted);
+
+  useNetworkTalkAlertSound(events, soundMuted, paused);
 
   const filtered = useMemo(() => {
     return events.filter((event) => {
@@ -62,15 +92,21 @@ export function LiveEventStream({
         event.namespace === namespaceFilter ||
         !event.namespace;
       const severityMatch = severityFilter === "all" || event.severity === severityFilter;
+      const sourceMatch =
+        sourceFilter === "all" ||
+        (sourceFilter === "network" && Boolean(event.networkTalk)) ||
+        (sourceFilter === "degradation" && isServiceTalkIssue(event)) ||
+        (sourceFilter === "kubernetes" && !event.networkTalk);
       const query = search.trim().toLowerCase();
       const searchMatch =
         !query ||
         event.title.toLowerCase().includes(query) ||
         event.message.toLowerCase().includes(query) ||
-        event.resourceName?.toLowerCase().includes(query);
-      return nsMatch && severityMatch && searchMatch;
+        event.resourceName?.toLowerCase().includes(query) ||
+        event.networkTalk?.path.toLowerCase().includes(query);
+      return nsMatch && severityMatch && sourceMatch && searchMatch;
     });
-  }, [events, namespaceFilter, severityFilter, search]);
+  }, [events, namespaceFilter, severityFilter, sourceFilter, search]);
 
   const counts = useMemo(() => {
     const base = events.filter(
@@ -81,6 +117,8 @@ export function LiveEventStream({
     );
     return {
       all: base.length,
+      network: base.filter((event) => event.networkTalk).length,
+      degradation: base.filter((event) => isServiceTalkIssue(event)).length,
       info: base.filter((e) => e.severity === "info").length,
       warning: base.filter((e) => e.severity === "warning").length,
       critical: base.filter((e) => e.severity === "critical").length,
@@ -94,7 +132,10 @@ export function LiveEventStream({
       <header className="events-header">
         <div>
           <h1 className="events-title">Live Event Stream</h1>
-          <p className="events-sub">Real-time cluster events from Kubernetes watch API</p>
+          <p className="events-sub">
+            Pod ↔ service talk from kernel flows — use Degradation for timeouts, drops, and path
+            worsening
+          </p>
         </div>
         <div className="events-header-right">
           <PageContextBar
@@ -111,12 +152,52 @@ export function LiveEventStream({
               value={search}
               onChange={(event) => setSearch(event.target.value)}
             />
+            <button
+              type="button"
+              className={`events-btn events-sound-toggle ${soundMuted ? "muted" : "on"}`}
+              title={
+                soundMuted
+                  ? "Unmute degraded / critical network talk alerts"
+                  : "Mute degraded / critical network talk alerts"
+              }
+              onClick={() => {
+                const nextMuted = !soundMuted;
+                setSoundMuted(nextMuted);
+                setAlertSoundMuted(nextMuted);
+                if (!nextMuted) {
+                  void unlockAlertSound();
+                }
+              }}
+            >
+              {soundMuted ? "Sound off" : "Sound on"}
+            </button>
             <button type="button" className="events-btn" onClick={() => onPausedChange(!paused)}>
               {paused ? "Resume" : "Pause"}
             </button>
           </div>
         </div>
       </header>
+
+      <div className="events-source-tabs">
+        {(
+          [
+            ["all", "All", counts.all],
+            ["network", "Network talk", counts.network],
+            ["degradation", "Degradation", counts.degradation],
+            ["kubernetes", "Kubernetes", counts.all - counts.network],
+          ] as const
+        ).map(([key, label, count]) => (
+          <button
+            key={key}
+            type="button"
+            className={`events-source-tab ${sourceFilter === key ? "active" : ""}`}
+            onClick={() => setSourceFilter(key)}
+          >
+            {label}
+            <span className="events-source-count">{count}</span>
+          </button>
+        ))}
+      </div>
 
       <div className="events-stats">
         {(
@@ -146,7 +227,7 @@ export function LiveEventStream({
               <th>TIME</th>
               <th>LVL</th>
               <th>EVENT</th>
-              <th>OBJECT</th>
+              <th>PATH / OBJECT</th>
               <th>NS</th>
               <th>SRC</th>
             </tr>
@@ -175,13 +256,19 @@ export function LiveEventStream({
                     </span>
                   </td>
                   <td className="events-body">
-                    <div className="events-row-title">{event.title}</div>
+                    <div className="events-row-title">
+                      {event.title}
+                      {event.networkTalk ? (
+                        <span className="talk-kind-pill">{talkKindLabel(event.networkTalk.kind)}</span>
+                      ) : null}
+                    </div>
                     <div className="events-row-msg">{event.message}</div>
                   </td>
                   <td className="events-mono">
-                    {event.resourceKind && event.resourceName
-                      ? `${event.resourceKind.toLowerCase()}/${event.resourceName}`
-                      : "—"}
+                    {event.networkTalk?.path ??
+                      (event.resourceKind && event.resourceName
+                        ? `${event.resourceKind.toLowerCase()}/${event.resourceName}`
+                        : "—")}
                   </td>
                   <td className="events-mono">{event.namespace ?? "—"}</td>
                   <td className="events-mono">{event.source}</td>

@@ -7,6 +7,12 @@ import {
   incidentKey,
   mergeIncident,
 } from "../core/monitoring/incidents";
+import {
+  evaluateFlowAlerts,
+  incidentFromFlowAlert,
+  mergeFlowIncident,
+} from "../core/monitoring/flow-alerts";
+import { NetworkIntrospectionEngine } from "../core/monitoring/network-introspection";
 import type {
   MonitorWorkerEvent,
   MonitorWorkerRequest,
@@ -22,17 +28,9 @@ import type {
   Incident,
   MonitorEvent,
 } from "../core/types/monitoring";
-import {
-  clearConnectionConfig,
-  loadConnectionConfig,
-  loadOpenIncidents,
-  loadRecentEvents,
-  resolveIncidentInDb,
-  saveConnectionConfig,
-  saveIncident,
-  saveMonitorEvent,
-} from "./persistence/monitor-db";
+import type { MonitorPersistence } from "./persistence/port";
 import { NetworkEngine } from "./network-engine";
+import type { NetworkSnapshot } from "../core/types/network";
 
 type EventHandler = (event: MonitorWorkerEvent) => void;
 
@@ -41,6 +39,25 @@ const POLL_INTERVAL_MS = 15_000;
 const EVENT_POLL_INTERVAL_MS = 3_000;
 const SEED_EVENT_LIMIT = 100;
 const DEFAULT_EBPF_URL = "http://127.0.0.1:9474";
+const DEFAULT_K8S_PROXY = "http://127.0.0.1:8001";
+
+function resolveProxyUrl(proxyUrl?: string): string {
+  if (proxyUrl?.startsWith("http")) {
+    return proxyUrl;
+  }
+  return DEFAULT_K8S_PROXY;
+}
+
+function resolveEbpfUrl(ebpfCollectorUrl?: string): string {
+  if (ebpfCollectorUrl?.trim()) {
+    return ebpfCollectorUrl.trim();
+  }
+  return DEFAULT_EBPF_URL;
+}
+
+function resolveOrigin(origin?: string, fallback = ""): string {
+  return origin ?? fallback;
+}
 
 export class MonitorRuntime {
   private listeners = new Set<EventHandler>();
@@ -56,6 +73,14 @@ export class MonitorRuntime {
   private eventTimestamps: number[] = [];
   private knownNamespaces: string[] = [];
   private networkEngine = new NetworkEngine();
+  private lastNetworkSnapshot: NetworkSnapshot | null = null;
+  private introspection = new NetworkIntrospectionEngine();
+
+  private readonly persistence: MonitorPersistence;
+
+  constructor(persistence: MonitorPersistence) {
+    this.persistence = persistence;
+  }
 
   onEvent(handler: EventHandler): () => void {
     this.listeners.add(handler);
@@ -105,8 +130,8 @@ export class MonitorRuntime {
   }
 
   async bootstrap(): Promise<void> {
-    const savedEvents = await loadRecentEvents(MAX_EVENTS);
-    const savedIncidents = await loadOpenIncidents();
+    const savedEvents = await this.persistence.loadRecentEvents(MAX_EVENTS);
+    const savedIncidents = await this.persistence.loadOpenIncidents();
     this.events = savedEvents;
     for (const incident of savedIncidents) {
       this.incidents.set(incident.id, incident);
@@ -119,17 +144,17 @@ export class MonitorRuntime {
       return { reconnected: true };
     }
 
-    const saved = await loadConnectionConfig();
+    const saved = await this.persistence.loadConnectionConfig();
     if (!saved || !this.pageOrigin) {
       return { reconnected: false };
     }
 
     void this.connect({
-      proxyUrl: saved.proxyUrl,
+      proxyUrl: resolveProxyUrl(saved.proxyUrl),
       token: saved.token,
       clusterName: saved.name,
-      ebpfCollectorUrl: saved.ebpfCollectorUrl ?? DEFAULT_EBPF_URL,
-      origin: saved.origin ?? this.pageOrigin,
+      ebpfCollectorUrl: resolveEbpfUrl(saved.ebpfCollectorUrl),
+      origin: resolveOrigin(saved.origin, this.pageOrigin),
     }).catch((error) => {
       const message = error instanceof Error ? error.message : "Reconnect failed";
       this.emit({ type: "ERROR", message });
@@ -141,9 +166,10 @@ export class MonitorRuntime {
   private async connect(input: ConnectClusterInput): Promise<ConnectClusterResult> {
     this.stopWatchers();
 
-    const proxyUrl = input.proxyUrl ?? "/k8s-api";
-    const origin = input.origin ?? this.pageOrigin;
+    const proxyUrl = resolveProxyUrl(input.proxyUrl);
+    const origin = resolveOrigin(input.origin, this.pageOrigin);
     const clusterName = input.clusterName ?? "minikube";
+    const ebpfCollectorUrl = resolveEbpfUrl(input.ebpfCollectorUrl);
 
     if (input.kubeconfig?.trim()) {
       const parsed = parseKubeconfig(input.kubeconfig, proxyUrl, origin);
@@ -151,12 +177,12 @@ export class MonitorRuntime {
         ...parsed,
         name: clusterName || parsed.name,
         token: input.token ?? parsed.token,
-        ebpfCollectorUrl: input.ebpfCollectorUrl,
+        ebpfCollectorUrl,
       };
     } else {
       this.config = {
         ...buildManualConnection(proxyUrl, input.token, clusterName, origin),
-        ebpfCollectorUrl: input.ebpfCollectorUrl,
+        ebpfCollectorUrl,
       };
     }
 
@@ -165,9 +191,11 @@ export class MonitorRuntime {
 
     this.connected = true;
 
-    this.networkEngine.configure(input.ebpfCollectorUrl ?? DEFAULT_EBPF_URL, origin);
+    this.networkEngine.configure(ebpfCollectorUrl, origin);
     this.networkEngine.onUpdate((snapshot) => {
       this.emit({ type: "NETWORK_SNAPSHOT", snapshot });
+      void this.onNetworkSnapshot(snapshot);
+      this.emitHealth();
     });
     this.networkEngine.start(this.client);
 
@@ -175,7 +203,7 @@ export class MonitorRuntime {
       ...this.config,
       savedAt: new Date().toISOString(),
     };
-    await saveConnectionConfig(saved);
+    await this.persistence.saveConnectionConfig(saved);
 
     const result: ConnectClusterResult = {
       connected: true,
@@ -199,10 +227,12 @@ export class MonitorRuntime {
   private async disconnect(): Promise<{ disconnected: true }> {
     this.stopWatchers();
     this.networkEngine.stop();
+    this.introspection.reset();
+    this.lastNetworkSnapshot = null;
     this.connected = false;
     this.config = null;
     this.client = null;
-    await clearConnectionConfig();
+    await this.persistence.clearConnectionConfig();
     this.emit({ type: "DISCONNECTED" });
     this.emitHealth();
     return { disconnected: true };
@@ -232,7 +262,7 @@ export class MonitorRuntime {
       updatedAt: new Date().toISOString(),
     };
     this.incidents.set(incidentId, resolved);
-    await resolveIncidentInDb(incidentId);
+    await this.persistence.resolveIncidentInDb(incidentId);
     this.emit({ type: "INCIDENT_RESOLVED", incidentId });
     this.emitHealth();
     return { resolved: true };
@@ -446,13 +476,13 @@ export class MonitorRuntime {
     this.pushEvent(event);
 
     if (persist) {
-      await saveMonitorEvent(event);
+      await this.persistence.saveMonitorEvent(event);
     }
     this.eventTimestamps.push(Date.now());
     this.eventTimestamps = this.eventTimestamps.filter((ts) => Date.now() - ts < 60_000);
 
     this.emit({ type: "MONITOR_EVENT", event });
-    if (event.category === "network" || event.category === "service") {
+    if ((event.category === "network" || event.category === "service") && !event.networkTalk) {
       this.networkEngine.ingestMonitorEvent(event);
     }
     await this.syncIncident(event);
@@ -461,6 +491,10 @@ export class MonitorRuntime {
   }
 
   private async syncIncident(event: MonitorEvent): Promise<void> {
+    if (event.networkTalk) {
+      return;
+    }
+
     const key = incidentKey(event);
     const derived = incidentFromEvent(event);
     if (!derived) {
@@ -470,6 +504,7 @@ export class MonitorRuntime {
     const existing = [...this.incidents.values()].find(
       (incident) =>
         incident.status === "open" &&
+        incident.alertSource !== "flow" &&
         incidentKey({
           ...event,
           id: incident.eventIds[0] ?? incident.id,
@@ -477,10 +512,51 @@ export class MonitorRuntime {
         }) === key,
     );
 
-    const incident = existing ? mergeIncident(existing, event) : derived;
+    const incident = existing ? mergeIncident(existing, event) : { ...derived, alertSource: "kubernetes" as const };
     this.incidents.set(incident.id, incident);
-    await saveIncident(incident);
+    await this.persistence.saveIncident(incident);
     this.emit({ type: "INCIDENT_UPSERTED", incident });
+  }
+
+  private async onNetworkSnapshot(snapshot: NetworkSnapshot): Promise<void> {
+    const previous = this.lastNetworkSnapshot;
+
+    for (const event of this.introspection.observe(snapshot, previous)) {
+      await this.ingestEvent(event);
+    }
+
+    await this.persistence.saveNetworkSnapshot?.(snapshot);
+
+    const alerts = evaluateFlowAlerts(snapshot, previous);
+    this.lastNetworkSnapshot = snapshot;
+
+    for (const alert of alerts) {
+      const incident = incidentFromFlowAlert(alert);
+      const existing = this.incidents.get(incident.id);
+      const next = existing?.status === "open" ? mergeFlowIncident(existing, alert) : incident;
+      this.incidents.set(next.id, next);
+      await this.persistence.saveIncident(next);
+      this.emit({ type: "INCIDENT_UPSERTED", incident: next });
+    }
+
+    const activeFlowRules = new Set(alerts.map((alert) => alert.ruleId));
+    for (const [id, incident] of this.incidents) {
+      if (
+        incident.status === "open" &&
+        incident.alertSource === "flow" &&
+        incident.ruleId &&
+        !activeFlowRules.has(incident.ruleId)
+      ) {
+        const resolved = {
+          ...incident,
+          status: "resolved" as const,
+          updatedAt: new Date().toISOString(),
+        };
+        this.incidents.set(id, resolved);
+        await this.persistence.saveIncident(resolved);
+        this.emit({ type: "INCIDENT_RESOLVED", incidentId: id });
+      }
+    }
   }
 
   private buildHealthSnapshot(): ClusterHealthSnapshot {
@@ -499,18 +575,18 @@ export class MonitorRuntime {
       }
     }
 
-    const failedPods = this.events.filter(
-      (event) => event.category === "workload" && event.severity === "critical",
-    ).length;
+    const snapshot = this.networkEngine.getSnapshot();
+    const podNodes = snapshot.topology.nodes.filter((node) => node.kind === "Pod");
+    const serviceNodes = snapshot.topology.nodes.filter((node) => node.kind === "Service");
 
     return {
       health,
       connected: this.connected,
       clusterName: this.config?.name ?? "disconnected",
-      podCount: 0,
-      runningPods: 0,
-      failedPods,
-      serviceCount: 0,
+      podCount: podNodes.length,
+      runningPods: podNodes.filter((node) => node.status === "healthy").length,
+      failedPods: podNodes.filter((node) => node.status === "degraded").length,
+      serviceCount: serviceNodes.length,
       openIncidents: openIncidents.length,
       eventsPerMinute: this.eventTimestamps.length,
     };

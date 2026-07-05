@@ -55,6 +55,7 @@ export class EbpfCollectorClient {
           mode?: string;
           message?: string;
           pods_indexed?: number;
+          services_indexed?: number;
         };
 
         return {
@@ -64,7 +65,8 @@ export class EbpfCollectorClient {
           programsAttached: body.programs,
           flowsPerSecond: body.flows_per_second,
           podsIndexed: body.pods_indexed,
-          message: formatModeMessage(body.mode, body.message ?? "collector live"),
+          servicesIndexed: body.services_indexed,
+          message: formatModeMessage(body.mode, body.message ?? "agent live"),
         };
       } catch (error) {
         lastError =
@@ -79,7 +81,7 @@ export class EbpfCollectorClient {
     return {
       connected: false,
       collectorUrl: this.collectorUrl,
-      message: `${lastError} — run ./scripts/port-forward-collector.sh`,
+      message: `${lastError} — run ./scripts/port-forward-agent.sh`,
     };
   }
 
@@ -118,18 +120,28 @@ export class EbpfCollectorClient {
         }
       : resolveEndpoint(flow.src_ip, topology);
 
-    const dst = flow.dst_pod
+    const dst = flow.dst_service
       ? {
-          kind: "Pod" as const,
-          name: flow.dst_pod,
-          namespace: flow.dst_namespace,
+          kind: "Service" as const,
+          name: flow.dst_service,
+          namespace: flow.dst_service_namespace,
           ip: flow.dst_ip,
         }
-      : resolveEndpoint(flow.dst_ip, topology);
+      : flow.dst_pod
+        ? {
+            kind: "Pod" as const,
+            name: flow.dst_pod,
+            namespace: flow.dst_namespace,
+            ip: flow.dst_ip,
+          }
+        : resolveEndpoint(flow.dst_ip, topology);
 
     return {
       id: `ebpf-${flow.timestamp}-${index}`,
       timestamp: flow.timestamp,
+      firstSeen: flow.first_seen,
+      lastSeen: flow.last_seen,
+      path: flow.path,
       source: "ebpf",
       src,
       dst,
@@ -139,11 +151,12 @@ export class EbpfCollectorClient {
       latencyMs: flow.latency_ms,
       bytesSent: flow.bytes_sent,
       bytesReceived: flow.bytes_received,
+      retransmits: flow.retransmits,
     };
   }
 }
 
-function formatModeMessage(mode?: string, fallback = "collector live"): string {
+function formatModeMessage(mode?: string, fallback = "agent live"): string {
   if (!mode) {
     return fallback;
   }
