@@ -6,6 +6,7 @@ import { FlowsDashboard } from "../components/FlowsDashboard";
 import { LiveEventStream } from "../components/LiveEventStream";
 import { NetworkAnalysisDashboard } from "../components/NetworkAnalysisDashboard";
 import { OverviewDashboard } from "../components/OverviewDashboard";
+import { ProfilingDashboard } from "../components/ProfilingDashboard";
 import { SettingsView } from "../components/SettingsView";
 import { TopologyDashboard } from "../components/TopologyDashboard";
 import { WorkloadsDashboard } from "../components/WorkloadsDashboard";
@@ -102,6 +103,8 @@ export function ConsoleApp() {
       {page === "network" && (
         <NetworkAnalysisDashboard snapshot={monitor.network} {...clusterPageProps} />
       )}
+
+      {page === "profiling" && <ProfilingDashboard {...clusterPageProps} />}
 
       {page === "alerts" && (
         <AlertsDashboard

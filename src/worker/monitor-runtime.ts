@@ -30,6 +30,8 @@ import type {
 } from "../core/types/monitoring";
 import type { MonitorPersistence } from "./persistence/port";
 import { NetworkEngine } from "./network-engine";
+import { buildProfileSnapshot } from "../core/profiling/build-node-profile";
+import type { AgentProfilePayload, ProfileSnapshot } from "../core/types/profiling";
 import type { NetworkSnapshot } from "../core/types/network";
 
 type EventHandler = (event: MonitorWorkerEvent) => void;
@@ -114,6 +116,8 @@ export class MonitorRuntime {
         return this.disconnect();
       case "GET_SNAPSHOT":
         return this.getSnapshot();
+      case "GET_PROFILE":
+        return this.getProfile(request.nodeName);
       case "SUBSCRIBE":
         this.emit({
           type: "MONITOR_SNAPSHOT",
@@ -594,5 +598,45 @@ export class MonitorRuntime {
 
   private emitHealth(): void {
     this.emit({ type: "HEALTH_UPDATE", snapshot: this.buildHealthSnapshot() });
+  }
+
+  private async fetchAgentProfile(): Promise<AgentProfilePayload | null> {
+    const ebpfUrl = resolveEbpfUrl(this.config?.ebpfCollectorUrl);
+    try {
+      const response = await fetch(`${ebpfUrl.replace(/\/$/, "")}/api/v1/profile`, {
+        headers: { Accept: "application/json" },
+      });
+      if (!response.ok) {
+        return null;
+      }
+      const body = (await response.json()) as { profile?: AgentProfilePayload };
+      return body.profile ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async getProfile(nodeName?: string): Promise<ProfileSnapshot> {
+    if (!this.connected || !this.client) {
+      return {
+        nodes: [],
+        updatedAt: new Date().toISOString(),
+      };
+    }
+
+    const [nodes, pods, agentProfile] = await Promise.all([
+      this.client.listNodes(),
+      this.client.listPodsOnNodes(),
+      this.fetchAgentProfile(),
+    ]);
+
+    return buildProfileSnapshot({
+      nodes,
+      pods,
+      network: this.networkEngine.getSnapshot(),
+      events: this.events,
+      agentProfile,
+      selectedNode: nodeName,
+    });
   }
 }
