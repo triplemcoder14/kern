@@ -1,72 +1,263 @@
-import type { ReactNode } from "react";
+import { useState, type ReactElement, type ReactNode, type SVGProps } from "react";
+import type { AuthUser } from "../../lib/auth-api";
+import { KernWordmark } from "./KernWordmark";
 
-export type NavPage = "events" | "network" | "settings" | "simulation";
+export type NavPage =
+  | "overview"
+  | "topology"
+  | "flows"
+  | "workloads"
+  | "network"
+  | "alerts"
+  | "events"
+  | "settings";
+
+export type NavId = NavPage;
 
 interface AppShellProps {
-  active: NavPage;
-  onNavigate: (page: NavPage) => void;
+  activeNav: NavId;
+  onNavigate: (nav: NavId, page: NavPage) => void;
   connected: boolean;
   alertCount: number;
+  user?: AuthUser | null;
+  onLogout?: () => Promise<void>;
   children: ReactNode;
   footer?: ReactNode;
 }
 
-const NAV_ITEMS: Array<{ id: NavPage; label: string; icon: string }> = [
-  { id: "events", label: "Events", icon: "◉" },
-  { id: "network", label: "Network", icon: "◎" },
-  { id: "simulation", label: "YAML", icon: "▣" },
+interface NavItem {
+  id: NavId;
+  page: NavPage;
+  label: string;
+  Icon: (props: SVGProps<SVGSVGElement>) => ReactElement;
+}
+
+function IconOverview(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden {...props}>
+      <rect x="2.5" y="2.5" width="6" height="6" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
+      <rect x="11.5" y="2.5" width="6" height="6" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
+      <rect x="2.5" y="11.5" width="6" height="6" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
+      <rect x="11.5" y="11.5" width="6" height="6" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
+    </svg>
+  );
+}
+
+function IconTopology(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden {...props}>
+      <circle cx="10" cy="10" r="2.2" stroke="currentColor" strokeWidth="1.4" />
+      <circle cx="4" cy="5" r="1.8" stroke="currentColor" strokeWidth="1.4" />
+      <circle cx="16" cy="5" r="1.8" stroke="currentColor" strokeWidth="1.4" />
+      <circle cx="4" cy="15" r="1.8" stroke="currentColor" strokeWidth="1.4" />
+      <circle cx="16" cy="15" r="1.8" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M5.6 6.2 8.2 8.6M14.4 6.2 11.8 8.6M5.6 13.8 8.2 11.4M14.4 13.8 11.8 11.4" stroke="currentColor" strokeWidth="1.2" />
+    </svg>
+  );
+}
+
+function IconFlows(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden {...props}>
+      <path d="M3 10h10M11 10l-3-3M11 10l-3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      <path d="M13 6h4M13 10h4M13 14h4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" opacity="0.55" />
+    </svg>
+  );
+}
+
+function IconNetwork(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden {...props}>
+      <circle cx="5" cy="10" r="2.2" stroke="currentColor" strokeWidth="1.4" />
+      <circle cx="15" cy="5" r="2.2" stroke="currentColor" strokeWidth="1.4" />
+      <circle cx="15" cy="15" r="2.2" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M7 9.2 12.6 6.1M7 10.8l5.6 3.1" stroke="currentColor" strokeWidth="1.4" />
+    </svg>
+  );
+}
+
+function IconWorkloads(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden {...props}>
+      <rect x="3" y="4" width="14" height="11" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M6 14V9.5l2.5 2 2-1.5 2.5 2V14" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconAlerts(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden {...props}>
+      <path
+        d="M10 3a5.5 5.5 0 0 1 5.5 5.5c0 4.2 1.5 5.5 1.5 5.5H3.5S5 12.7 5 8.5A5.5 5.5 0 0 1 10 3Z"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+      />
+      <path d="M8.2 15.5a1.8 1.8 0 0 0 3.6 0" stroke="currentColor" strokeWidth="1.4" />
+    </svg>
+  );
+}
+
+function IconEvents(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden {...props}>
+      <path d="M4 5h12M4 10h8M4 15h10" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function IconLogout(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden {...props}>
+      <path
+        d="M7.5 3.5H5.5A1.5 1.5 0 0 0 4 5v10a1.5 1.5 0 0 0 1.5 1.5h2"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+      <path
+        d="M8.5 10h7M13 7l3 3-3 3"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function IconSettings(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden {...props}>
+      <circle cx="10" cy="10" r="2.2" stroke="currentColor" strokeWidth="1.4" />
+      <path
+        d="M10 2.5v2M10 15.5v2M3.5 10h2M14.5 10h2M5.4 5.4l1.4 1.4M13.2 13.2l1.4 1.4M5.4 14.6l1.4-1.4M13.2 6.8l1.4-1.4"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+const PRIMARY_NAV: NavItem[] = [
+  { id: "overview", page: "overview", label: "Overview", Icon: IconOverview },
+  { id: "topology", page: "topology", label: "Topology", Icon: IconTopology },
+  { id: "flows", page: "flows", label: "Flows", Icon: IconFlows },
+  { id: "workloads", page: "workloads", label: "Workloads", Icon: IconWorkloads },
+  { id: "network", page: "network", label: "Network", Icon: IconNetwork },
+  { id: "alerts", page: "alerts", label: "Alerts", Icon: IconAlerts },
+  { id: "events", page: "events", label: "Events", Icon: IconEvents },
+];
+
+const SECONDARY_NAV: NavItem[] = [
+  { id: "settings", page: "settings", label: "Settings", Icon: IconSettings },
 ];
 
 export function AppShell({
-  active,
+  activeNav,
   onNavigate,
   connected,
   alertCount,
+  user,
+  onLogout,
   children,
   footer,
 }: AppShellProps) {
+  const [collapsed, setCollapsed] = useState(false);
+  const userInitial = user?.name.slice(0, 1).toUpperCase() ?? "?";
+
+  const handleLogout = () => {
+    if (!onLogout) {
+      return;
+    }
+    void onLogout().then(() => {
+      window.location.href = "/";
+    });
+  };
+
+  const renderNavItem = (item: NavItem) => {
+    const isActive = activeNav === item.id;
+    const showBadge = item.id === "alerts" && alertCount > 0;
+    return (
+      <button
+        key={item.id}
+        type="button"
+        className={`shell-nav-item ${isActive ? "active" : ""}`}
+        onClick={() => onNavigate(item.id, item.page)}
+        title={collapsed ? item.label : undefined}
+      >
+        <span className="shell-nav-icon">
+          <item.Icon className="shell-nav-svg" />
+        </span>
+        {!collapsed ? <span className="shell-nav-label">{item.label}</span> : null}
+        {showBadge && !collapsed ? <span className="shell-nav-badge">{alertCount}</span> : null}
+        {showBadge && collapsed ? <span className="shell-nav-badge-dot">{alertCount}</span> : null}
+      </button>
+    );
+  };
+
   return (
-    <div className="shell">
+    <div className={`shell ${collapsed ? "shell-collapsed" : ""}`}>
       <aside className="shell-sidebar">
         <div className="shell-brand">
-          <span className="shell-logo">◆</span>
-          <div>
-            <div className="shell-title">PORT-OF-K8S</div>
-            <div className="shell-beta">BETA</div>
-          </div>
-        </div>
-
-        <nav className="shell-nav">
-          <div className="shell-nav-group">MONITOR</div>
-          {NAV_ITEMS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={`shell-nav-item ${active === item.id ? "active" : ""}`}
-              onClick={() => onNavigate(item.id)}
-            >
-              <span className="shell-nav-icon">{item.icon}</span>
-              {item.label}
-            </button>
-          ))}
-        </nav>
-
-        <div className="shell-nav">
-          <div className="shell-nav-group">SYSTEM</div>
+          <KernWordmark className="shell-wordmark" showText={!collapsed} />
           <button
             type="button"
-            className={`shell-nav-item ${active === "settings" ? "active" : ""}`}
-            onClick={() => onNavigate("settings")}
+            className="shell-collapse"
+            onClick={() => setCollapsed((value) => !value)}
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            title={collapsed ? "Expand" : "Collapse"}
           >
-            <span className="shell-nav-icon">⚙</span>
-            Settings
+            {collapsed ? "»" : "«"}
           </button>
         </div>
 
-        <div className="shell-status">
-          <div className={`shell-status-dot ${connected ? "on" : ""}`} />
-          <span>{connected ? "CONNECTED" : "OFFLINE"}</span>
-          {alertCount > 0 ? <span className="shell-badge">{alertCount}</span> : null}
+        <nav className="shell-nav shell-nav-primary">
+          {PRIMARY_NAV.map(renderNavItem)}
+        </nav>
+
+        <nav className="shell-nav shell-nav-secondary">{SECONDARY_NAV.map(renderNavItem)}</nav>
+
+        <div className="shell-sidebar-foot">
+          <div className="shell-account">
+            {user?.avatarUrl ? (
+              <img src={user.avatarUrl} alt="" className="shell-user-avatar shell-user-avatar-img" />
+            ) : (
+              <div className="shell-user-avatar">{userInitial}</div>
+            )}
+
+            {!collapsed ? (
+              <div className="shell-account-meta">
+                <div className="shell-user-name">{user?.name ?? "Signed in"}</div>
+                <div className="shell-account-sub">
+                  <span className="shell-user-role">{user?.provider ?? "Account"}</span>
+                  <span className="shell-account-sep" aria-hidden>
+                    ·
+                  </span>
+                  <span className="shell-account-status">
+                    <span className={`shell-status-dot ${connected ? "on" : ""}`} />
+                    {connected ? "Connected" : "Offline"}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <span className={`shell-status-dot shell-account-dot ${connected ? "on" : ""}`} />
+            )}
+
+            {onLogout ? (
+              <button
+                type="button"
+                className="shell-account-logout"
+                onClick={handleLogout}
+                aria-label="Sign out"
+                title="Sign out"
+              >
+                <IconLogout className="shell-nav-svg" />
+              </button>
+            ) : null}
+          </div>
         </div>
       </aside>
 

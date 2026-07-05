@@ -8,7 +8,7 @@ interface ClusterDB extends DBSchema {
   };
 }
 
-const DB_NAME = "port-of-k8s";
+const DB_NAME = "kern";
 const DB_VERSION = 1;
 
 let dbPromise: Promise<IDBPDatabase<ClusterDB>> | null = null;

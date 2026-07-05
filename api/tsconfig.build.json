@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "module": "commonjs",
+    "declaration": false,
+    "removeComments": true,
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "allowSyntheticDefaultImports": true,
+    "target": "ES2022",
+    "sourceMap": true,
+    "outDir": "./dist",
+    "rootDir": "..",
+    "baseUrl": "..",
+    "incremental": false,
+    "skipLibCheck": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "moduleResolution": "node",
+    "types": ["node"],
+    "paths": {
+      "@aws-sdk/client-s3": ["api/node_modules/@aws-sdk/client-s3"]
+    }
+  },
+  "include": ["src/**/*.ts", "../src/core/**/*.ts", "../src/worker/**/*.ts", "../storage/**/*.ts"],
+  "exclude": ["../src/worker/persistence/idb-persistence.ts", "../src/worker/persistence/indexeddb.ts"]
+}

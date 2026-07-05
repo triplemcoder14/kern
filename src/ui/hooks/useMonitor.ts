@@ -9,7 +9,7 @@ import type {
 } from "../../core/types/monitoring";
 import type { NetworkSnapshot } from "../../core/types/network";
 import { loadClusterConfig } from "../../core/config/cluster-config";
-import { getMonitorWorker } from "../../lib/monitor-rpc";
+import { getMonitorApiClient } from "../../lib/monitor-api";
 
 const EMPTY_NETWORK: NetworkSnapshot = {
   topology: { nodes: [], edges: [], updatedAt: "" },
@@ -30,7 +30,7 @@ const EMPTY_HEALTH: ClusterHealthSnapshot = {
 };
 
 export function useMonitor() {
-  const worker = useMemo(() => getMonitorWorker(), []);
+  const client = useMemo(() => getMonitorApiClient(), []);
   const [events, setEvents] = useState<MonitorEvent[]>([]);
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [health, setHealth] = useState<ClusterHealthSnapshot>(EMPTY_HEALTH);
@@ -41,7 +41,7 @@ export function useMonitor() {
   const [namespaces, setNamespaces] = useState<string[]>([]);
 
   useEffect(() => {
-    const unsubscribe = worker.onEvent((event: MonitorWorkerEvent) => {
+    const unsubscribe = client.onEvent((event: MonitorWorkerEvent) => {
       switch (event.type) {
         case "CONNECTED":
           setConnection(event.result);
@@ -92,23 +92,19 @@ export function useMonitor() {
     });
 
     const config = loadClusterConfig();
-    worker
-      .request({
-        type: "SET_ORIGIN",
-        origin: window.location.origin,
-        ebpfCollectorUrl: config.ebpfCollectorUrl,
-      })
-      .then(() => worker.subscribe())
+    client
+      .initSession(config.ebpfCollectorUrl)
       .catch((err: Error) => setError(err.message));
+
     return unsubscribe;
-  }, [worker]);
+  }, [client]);
 
   const connect = useCallback(
     async (input: ConnectClusterInput) => {
       setBusy(true);
       setError(null);
       try {
-        const result = await worker.request<ConnectClusterResult>({ type: "CONNECT", input });
+        const result = await client.request<ConnectClusterResult>({ type: "CONNECT", input });
         setConnection(result);
         return result;
       } catch (err) {
@@ -119,24 +115,24 @@ export function useMonitor() {
         setBusy(false);
       }
     },
-    [worker],
+    [client],
   );
 
   const disconnect = useCallback(async () => {
     setBusy(true);
     try {
-      await worker.request({ type: "DISCONNECT" });
+      await client.request({ type: "DISCONNECT" });
       setConnection(null);
     } finally {
       setBusy(false);
     }
-  }, [worker]);
+  }, [client]);
 
   const resolveIncident = useCallback(
     async (incidentId: string) => {
-      await worker.request({ type: "RESOLVE_INCIDENT", incidentId });
+      await client.request({ type: "RESOLVE_INCIDENT", incidentId });
     },
-    [worker],
+    [client],
   );
 
   const openIncidents = useMemo(

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type WheelEvent } from "react";
+import { edgeHeat, flameColor } from "../../core/network/flame-colors";
 import { truncateNodeName, type GraphEdgeLayout, type GraphLayout } from "../../core/network/graph-model";
 
 interface TopologyGraphProps {
@@ -59,6 +60,21 @@ export function TopologyGraph({
     }
     return new Set([edge.from, edge.to]);
   }, [focusEdgeId, layout.edges]);
+
+  const { maxFlows, maxLatency, nodeHeat } = useMemo(() => {
+    const maxF = Math.max(...layout.edges.map((edge) => edge.flowCount), 1);
+    const maxL = Math.max(...layout.edges.map((edge) => edge.latencyP99Ms ?? 0), 1);
+    const heatMap = new Map<string, number>();
+
+    for (const edge of layout.edges) {
+      const heat = edgeHeat(edge.flowCount, edge.latencyP99Ms, maxF, maxL);
+      for (const nodeId of [edge.from, edge.to]) {
+        heatMap.set(nodeId, Math.max(heatMap.get(nodeId) ?? 0, heat));
+      }
+    }
+
+    return { maxFlows: maxF, maxLatency: maxL, nodeHeat: heatMap };
+  }, [layout.edges]);
 
   const fitToView = useCallback(() => {
     const viewport = viewportRef.current;
@@ -236,6 +252,10 @@ export function TopologyGraph({
             const selected = selectedEdgeId === edge.id;
             const hovered = hoveredEdgeId === edge.id;
             const dimmed = linkedNodeIds !== null && focusEdgeId !== edge.id;
+            const heat = edgeHeat(edge.flowCount, edge.latencyP99Ms, maxFlows, maxLatency);
+            const stroke = flameColor(heat, edge.flowCount > 0 ? 0.95 : 0.35);
+            const strokeWidth =
+              edge.flowCount > 0 ? 1.5 + heat * 2.5 : selected || hovered ? 2 : 1.25;
             return (
               <g
                 key={edge.id}
@@ -247,8 +267,22 @@ export function TopologyGraph({
                 onMouseEnter={() => setHoveredEdgeId(edge.id)}
                 onMouseLeave={() => setHoveredEdgeId(null)}
               >
-                <path d={edge.path} className="graph-edge-path" markerEnd="url(#arrow)" />
-                <text x={edge.labelX} y={edge.labelY} className="graph-edge-label">
+                <path
+                  d={edge.path}
+                  className="graph-edge-path graph-edge-flame"
+                  markerEnd="url(#arrow)"
+                  style={{
+                    stroke,
+                    strokeWidth,
+                    opacity: dimmed ? 0.18 : 1,
+                  }}
+                />
+                <text
+                  x={edge.labelX}
+                  y={edge.labelY}
+                  className="graph-edge-label"
+                  fill={flameColor(heat, 0.9)}
+                >
                   {edge.label}
                 </text>
               </g>
@@ -259,6 +293,9 @@ export function TopologyGraph({
             const linked = linkedNodeIds?.has(node.id) ?? false;
             const dimmed = linkedNodeIds !== null && !linked;
             const displayName = truncateNodeName(node.name);
+            const heat = nodeHeat.get(node.id) ?? 0.06;
+            const accent = flameColor(heat, 0.95);
+            const fill = flameColor(heat, 0.1);
             return (
               <g
                 key={node.id}
@@ -281,12 +318,16 @@ export function TopologyGraph({
                   height={node.height}
                   rx="2"
                   className={`graph-node-box status-${node.status}`}
+                  fill={fill}
+                  stroke={accent}
+                  strokeWidth={linked ? 2 : 1}
                 />
                 <circle
                   cx={node.x + 14}
                   cy={node.y + node.height / 2}
                   r="4"
-                  className={`graph-node-dot status-${node.status}`}
+                  fill={accent}
+                  stroke={accent}
                 />
                 <text x={node.x + 26} y={node.y + 18} className="graph-node-kind">
                   {node.kind}
@@ -306,12 +347,12 @@ export function TopologyGraph({
 export function GraphLegend() {
   return (
     <div className="graph-legend graph-legend-inline">
-      <span className="legend-item edge-ok">Healthy</span>
-      <span className="legend-item edge-warn">Degraded</span>
-      <span className="legend-item edge-bad">Error</span>
+      <span className="legend-item legend-heat">
+        <span className="legend-heat-bar" aria-hidden />
+        Low → High traffic
+      </span>
       <span className="legend-item edge-ebpf">Kernel</span>
       <span className="legend-item edge-k8s">Inferred</span>
-      <span className="legend-item edge-route">Route</span>
     </div>
   );
 }

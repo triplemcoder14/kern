@@ -35,7 +35,7 @@ export function MonitorTopBar({ health, connection, openIncidents }: MonitorTopB
       <div className="topbar-left">
         <div className="brand">
           <span className="brand-mark" />
-          <span className="brand-name">PORT-OF-K8S</span>
+          <span className="brand-name">KERN</span>
         </div>
         <span className="version">v0.2 monitor</span>
       </div>

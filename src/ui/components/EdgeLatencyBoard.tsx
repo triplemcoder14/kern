@@ -1,4 +1,5 @@
 import type { GraphEdgeLayout } from "../../core/network/graph-model";
+import { flameColor, valueHeat } from "../../core/network/flame-colors";
 import type { LatencyHistogram } from "../../core/network/latency";
 import { LatencyHistogramChart, TrafficSparkline } from "./LatencyHistogramChart";
 
@@ -55,6 +56,7 @@ export function EdgeLatencyBoard({ edges, selectedEdgeId, onSelectEdge }: EdgeLa
   }
 
   const hasLatency = ranked.some((edge) => edge.latencySampleCount && edge.latencySampleCount > 0);
+  const maxP99 = Math.max(...ranked.map((edge) => edge.latencyP99Ms ?? 0), 1);
 
   return (
     <section className="panel edge-latency-panel">
@@ -62,7 +64,7 @@ export function EdgeLatencyBoard({ edges, selectedEdgeId, onSelectEdge }: EdgeLa
         EDGE LATENCY
         <span className="panel-meta">
           {ranked.length} active routes
-          {!hasLatency ? " · traffic only (redeploy collector for latency_ms)" : ""}
+          {!hasLatency ? " · traffic only (redeploy agent for latency_ms)" : ""}
         </span>
       </div>
       <div className="edge-latency-table-wrap">
@@ -92,7 +94,16 @@ export function EdgeLatencyBoard({ edges, selectedEdgeId, onSelectEdge }: EdgeLa
                 </td>
                 <td>{formatMs(edge.latencyP50Ms)}</td>
                 <td>{formatMs(edge.latencyP95Ms)}</td>
-                <td className={edge.latencyP99Ms !== undefined && edge.latencyP99Ms > 500 ? "latency-hot" : ""}>
+                <td
+                  style={
+                    edge.latencyP99Ms !== undefined && edge.latencyP99Ms > 0
+                      ? { color: flameColor(valueHeat(edge.latencyP99Ms, maxP99), 1) }
+                      : undefined
+                  }
+                  className={
+                    edge.latencyP99Ms !== undefined && edge.latencyP99Ms > 500 ? "latency-hot" : ""
+                  }
+                >
                   {formatMs(edge.latencyP99Ms)}
                 </td>
                 <td>{edge.flowCount}</td>

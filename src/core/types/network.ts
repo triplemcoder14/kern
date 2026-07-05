@@ -11,6 +11,9 @@ export interface NetworkEndpoint {
 export interface NetworkFlow {
   id: string;
   timestamp: string;
+  firstSeen?: string;
+  lastSeen?: string;
+  path?: string;
   source: FlowSource;
   src: NetworkEndpoint;
   dst: NetworkEndpoint;
@@ -20,6 +23,7 @@ export interface NetworkFlow {
   latencyMs?: number;
   bytesSent?: number;
   bytesReceived?: number;
+  retransmits?: number;
 }
 
 export interface NetworkNode {
@@ -67,21 +71,30 @@ export interface EbpfCollectorStatus {
   programsAttached?: number;
   flowsPerSecond?: number;
   podsIndexed?: number;
+  servicesIndexed?: number;
   message?: string;
 }
 
 export interface EbpfFlowPayload {
   timestamp: string;
+  first_seen?: string;
+  last_seen?: string;
+  path?: string;
   src_ip: string;
   dst_ip: string;
   src_pod?: string;
   dst_pod?: string;
   src_namespace?: string;
   dst_namespace?: string;
+  src_service?: string;
+  src_service_namespace?: string;
+  dst_service?: string;
+  dst_service_namespace?: string;
   protocol: string;
   port: number;
   latency_ms?: number;
   verdict?: string;
   bytes_sent?: number;
   bytes_received?: number;
+  retransmits?: number;
 }

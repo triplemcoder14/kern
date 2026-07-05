@@ -5,15 +5,14 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      "/k8s-api": {
-        target: "http://127.0.0.1:8001",
+      "/api": {
+        target: "http://127.0.0.1:3000",
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/k8s-api/, ""),
       },
-      "/ebpf-api": {
-        target: "http://127.0.0.1:9474",
+      "/monitor/ws": {
+        target: "http://127.0.0.1:3000",
+        ws: true,
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/ebpf-api/, ""),
       },
     },
   },
