@@ -32,7 +32,7 @@ export class NetworkEngine {
       this.lastEbpfStatus = {
         connected: false,
         collectorUrl: "",
-        message: "Configure collector URL in Settings",
+        message: "Configure agent URL in Settings",
       };
     }
   }

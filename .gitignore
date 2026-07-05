@@ -6,4 +6,7 @@ dist/
 .DS_Store
 .vite/
 coverage/
-README.md/
+.kern/
+api/dist/
+api/data/
+api/node_modules/

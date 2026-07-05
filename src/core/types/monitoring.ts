@@ -8,6 +8,26 @@ export type MonitorCategory =
   | "incident"
   | "system";
 
+import type { FlowVerdict } from "./network";
+
+export type NetworkTalkKind = "started" | "degraded" | "ended";
+
+export interface NetworkTalkMeta {
+  kind: NetworkTalkKind;
+  talkKey: string;
+  path: string;
+  protocol: string;
+  port: number;
+  verdict: FlowVerdict;
+  latencyMs?: number;
+  srcKind: string;
+  srcName: string;
+  srcNamespace?: string;
+  dstKind: string;
+  dstName: string;
+  dstNamespace?: string;
+}
+
 export interface MonitorEvent {
   id: string;
   timestamp: string;
@@ -19,6 +39,7 @@ export interface MonitorEvent {
   resourceKind?: string;
   resourceName?: string;
   source: string;
+  networkTalk?: NetworkTalkMeta;
 }
 
 export interface Incident {
@@ -34,6 +55,10 @@ export interface Incident {
   resourceName?: string;
   status: "open" | "resolved";
   eventIds: string[];
+  alertSource?: "kubernetes" | "flow";
+  ruleId?: string;
+  path?: string;
+  cause?: string;
 }
 
 export type ClusterHealth = "healthy" | "degraded" | "critical" | "disconnected";

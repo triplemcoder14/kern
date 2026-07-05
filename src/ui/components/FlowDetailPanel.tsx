@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { topTalkers, type GraphEdgeLayout, type GraphNodeLayout } from "../../core/network/graph-model";
 import type { NetworkFlow } from "../../core/types/network";
-import { LatencyHistogramChart, TrafficSparkline } from "./LatencyHistogramChart";
+import { LatencyHistogramChart, talkerBarColor, TrafficSparkline } from "./LatencyHistogramChart";
 
 interface FlowDetailPanelProps {
   edge: GraphEdgeLayout | null;
@@ -125,7 +125,13 @@ export function FlowDetailPanel({
               <div key={talker.name} className="talker-row">
                 <span className="talker-name">{talker.name}</span>
                 <span className="talker-bar-wrap">
-                  <span className="talker-bar" style={{ width: `${width}%` }} />
+                  <span
+                    className="talker-bar talker-bar-flame"
+                    style={{
+                      width: `${width}%`,
+                      background: talkerBarColor(talker.count, max),
+                    }}
+                  />
                 </span>
                 <span className="talker-count">{talker.count}</span>
               </div>
@@ -143,8 +149,12 @@ export function FlowDetailPanel({
             <div key={flow.id} className="flow-detail-row">
               <span>{flow.verdict}</span>
               <span>
-                {flow.protocol}:{flow.port}
-                {flow.latencyMs !== undefined ? ` · ${flow.latencyMs}ms` : ""}
+                {flow.path ??
+                  `${flow.protocol}:${flow.port}${flow.latencyMs !== undefined ? ` · ${flow.latencyMs}ms` : ""}`}
+                {flow.bytesSent !== undefined ? ` · ↑${flow.bytesSent}B` : ""}
+                {flow.retransmits !== undefined && flow.retransmits > 0
+                  ? ` · ${flow.retransmits} retx`
+                  : ""}
               </span>
             </div>
           ))
