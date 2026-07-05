@@ -1,4 +1,4 @@
-//go:build hubble
+//go:build ignore
 
 package hubble
 

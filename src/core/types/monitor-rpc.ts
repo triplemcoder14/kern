@@ -13,6 +13,7 @@ export type MonitorWorkerRequest =
   | { type: "CONNECT"; input: ConnectClusterInput }
   | { type: "DISCONNECT" }
   | { type: "GET_SNAPSHOT" }
+  | { type: "GET_PROFILE"; nodeName?: string }
   | { type: "SUBSCRIBE" }
   | { type: "RESOLVE_INCIDENT"; incidentId: string };
 

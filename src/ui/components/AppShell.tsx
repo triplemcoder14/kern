@@ -8,6 +8,7 @@ export type NavPage =
   | "flows"
   | "workloads"
   | "network"
+  | "profiling"
   | "alerts"
   | "events"
   | "settings";
@@ -127,6 +128,15 @@ function IconLogout(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+function IconProfiling(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden {...props}>
+      <path d="M4 15V8l3 4 2-3 3 6 4-8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+      <rect x="3" y="3" width="14" height="14" rx="2" stroke="currentColor" strokeWidth="1.4" />
+    </svg>
+  );
+}
+
 function IconSettings(props: SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 20 20" fill="none" aria-hidden {...props}>
@@ -147,6 +157,7 @@ const PRIMARY_NAV: NavItem[] = [
   { id: "flows", page: "flows", label: "Flows", Icon: IconFlows },
   { id: "workloads", page: "workloads", label: "Workloads", Icon: IconWorkloads },
   { id: "network", page: "network", label: "Network", Icon: IconNetwork },
+  { id: "profiling", page: "profiling", label: "Profiling", Icon: IconProfiling },
   { id: "alerts", page: "alerts", label: "Alerts", Icon: IconAlerts },
   { id: "events", page: "events", label: "Events", Icon: IconEvents },
 ];

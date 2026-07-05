@@ -52,6 +52,7 @@ interface K8sPodObject {
     namespace?: string;
   };
   spec?: {
+    nodeName?: string;
     containers?: Array<{
       ports?: Array<{ containerPort: number; protocol?: string }>;
     }>;
@@ -95,6 +96,24 @@ interface K8sEndpointsObject {
     addresses?: Array<{ ip?: string; targetRef?: { kind?: string; name?: string } }>;
     ports?: Array<{ port?: number; protocol?: string; name?: string }>;
   }>;
+}
+
+interface K8sNodeObject {
+  metadata: {
+    name: string;
+    labels?: Record<string, string>;
+  };
+  status?: {
+    conditions?: Array<{ type?: string; status?: string }>;
+    capacity?: Record<string, string>;
+  };
+}
+
+export interface K8sNodeSummary {
+  name: string;
+  zone?: string;
+  cpuCores?: number;
+  ready: boolean;
 }
 
 export class K8sApiClient {
@@ -218,6 +237,40 @@ export class K8sApiClient {
     }
     const body = (await response.json()) as K8sList<K8sEndpointsObject>;
     return body.items ?? [];
+  }
+
+  async listNodes(): Promise<K8sNodeSummary[]> {
+    const response = await this.fetchWithTimeout("/api/v1/nodes");
+    if (!response.ok) {
+      throw new Error(`Failed to list nodes (${response.status})`);
+    }
+    const body = (await response.json()) as K8sList<K8sNodeObject>;
+    return (body.items ?? []).map((node) => {
+      const ready = (node.status?.conditions ?? []).some(
+        (condition) => condition.type === "Ready" && condition.status === "True",
+      );
+      const zone =
+        node.metadata.labels?.["topology.kubernetes.io/zone"] ??
+        node.metadata.labels?.["failure-domain.beta.kubernetes.io/zone"];
+      const cpu = node.status?.capacity?.cpu;
+      return {
+        name: node.metadata.name,
+        zone,
+        cpuCores: cpu ? Number.parseInt(cpu, 10) : undefined,
+        ready,
+      };
+    });
+  }
+
+  async listPodsOnNodes(): Promise<Array<{ namespace: string; name: string; nodeName: string }>> {
+    const pods = await this.listPods();
+    return pods
+      .map((pod) => ({
+        namespace: pod.metadata.namespace ?? "default",
+        name: pod.metadata.name,
+        nodeName: pod.spec?.nodeName ?? "",
+      }))
+      .filter((pod) => pod.nodeName.length > 0);
   }
 
   async watchEvents(
