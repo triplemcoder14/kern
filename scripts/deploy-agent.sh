@@ -23,9 +23,6 @@ pull_with_retry() {
   return 1
 }
 
-echo "Downloading Go modules on host..."
-(cd "$ROOT/agent" && go mod download)
-
 if command -v minikube >/dev/null 2>&1 && minikube status >/dev/null 2>&1; then
   echo "Building directly in minikube Docker (avoids stale image load)..."
   # shellcheck disable=SC1091
@@ -34,7 +31,7 @@ if command -v minikube >/dev/null 2>&1 && minikube status >/dev/null 2>&1; then
 fi
 
 echo "Pre-pulling base images (avoids corrupted partial layers)..."
-pull_with_retry "golang:1.23-alpine"
+pull_with_retry "golang:1.25-alpine"
 pull_with_retry "gcr.io/distroless/static-debian12"
 
 echo "Building KERN agent image: $IMAGE"

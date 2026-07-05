@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Inject, Param, Post } from "@nestjs/common";
+import { Body, Controller, Get, Inject, Param, Post, Query } from "@nestjs/common";
 import type { ConnectClusterInput } from "../../../src/core/types/monitoring";
 import { MonitorService } from "./monitor.service";
 
@@ -45,6 +45,11 @@ export class MonitorController {
   @Get("snapshot")
   snapshot() {
     return this.monitorService.handle({ type: "GET_SNAPSHOT" });
+  }
+
+  @Get("profile")
+  profile(@Query("node") nodeName?: string) {
+    return this.monitorService.handle({ type: "GET_PROFILE", nodeName });
   }
 
   @Get("snapshots/history")

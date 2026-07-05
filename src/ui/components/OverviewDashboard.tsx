@@ -123,6 +123,7 @@ export function OverviewDashboard({
               ["topology", "topology", "Topology"],
               ["flows", "flows", "Flows"],
               ["workloads", "workloads", "Workloads"],
+              ["profiling", "profiling", "Profiling"],
               ["alerts", "alerts", "Alerts"],
             ] as const
           ).map(([nav, page, label]) => (
