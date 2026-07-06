@@ -1,7 +1,6 @@
 import { useMemo, useState } from "react";
 import type { MonitorEvent, MonitorSeverity, NetworkTalkKind } from "../../core/types/monitoring";
-import { useNetworkTalkAlertSound } from "../hooks/useNetworkTalkAlertSound";
-import { isAlertSoundMuted, setAlertSoundMuted, unlockAlertSound } from "../lib/alert-sound";
+import { unlockAlertSound } from "../lib/alert-sound";
 import { PageContextBar } from "./PageContextBar";
 
 type SourceFilter = "all" | "kubernetes" | "network" | "degradation";
@@ -66,6 +65,8 @@ interface LiveEventStreamProps {
   connected: boolean;
   paused: boolean;
   onPausedChange: (value: boolean) => void;
+  soundMuted: boolean;
+  onSoundMutedChange: (muted: boolean) => void;
 }
 
 export function LiveEventStream({
@@ -77,13 +78,12 @@ export function LiveEventStream({
   connected,
   paused,
   onPausedChange,
+  soundMuted,
+  onSoundMutedChange,
 }: LiveEventStreamProps) {
   const [search, setSearch] = useState("");
   const [severityFilter, setSeverityFilter] = useState<MonitorSeverity | "all">("all");
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
-  const [soundMuted, setSoundMuted] = useState(isAlertSoundMuted);
-
-  useNetworkTalkAlertSound(events, soundMuted, paused);
 
   const filtered = useMemo(() => {
     return events.filter((event) => {
@@ -157,13 +157,12 @@ export function LiveEventStream({
               className={`events-btn events-sound-toggle ${soundMuted ? "muted" : "on"}`}
               title={
                 soundMuted
-                  ? "Unmute degraded / critical network talk alerts"
-                  : "Mute degraded / critical network talk alerts"
+                  ? "Unmute pod ↔ service talk sounds (start + degraded alerts)"
+                  : "Mute pod ↔ service talk sounds (start + degraded alerts)"
               }
               onClick={() => {
                 const nextMuted = !soundMuted;
-                setSoundMuted(nextMuted);
-                setAlertSoundMuted(nextMuted);
+                onSoundMutedChange(nextMuted);
                 if (!nextMuted) {
                   void unlockAlertSound();
                 }

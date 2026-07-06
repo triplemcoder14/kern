@@ -106,8 +106,8 @@ const FEATURES: readonly LandingFeature[] = [
   },
   {
     id: "storage",
-    label: "Your data",
-    body: "S3-compatible storage — MinIO, R2, AWS. You own the bucket.",
+    label: "Local & S3 storage",
+    body: "Local files for dev, or your own S3-compatible bucket — MinIO, R2, AWS.",
     accent: "ok",
   },
 ] as const;
@@ -127,7 +127,7 @@ const FEATURE_NAV = [
   { label: "Events", href: "#events" },
   { label: "Alerts", href: "#feature-alerts" },
   { label: "Profiling", href: "#profiling" },
-  { label: "Your data", href: "#feature-storage" },
+  { label: "Local & S3 storage", href: "#feature-storage" },
 ] as const;
 
 export function LandingPage() {
@@ -336,7 +336,7 @@ export function LandingPage() {
                 <KernWordmark />
               </div>
               <p className="landing-footer-blurb">
-                Kernel-native observability for Kubernetes. eBPF telemetry, your storage, zero
+                Kernel-native observability for Kubernetes. eBPF telemetry, local or S3 storage, zero
                 instrumentation.
               </p>
             </div>

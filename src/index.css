@@ -394,6 +394,41 @@ input {
   box-shadow: 0 0 0 2px var(--accent-muted);
 }
 
+.shell-account-sound {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition:
+    color 0.15s ease,
+    background 0.15s ease;
+}
+
+.shell-account-sound.on {
+  color: var(--accent);
+}
+
+.shell-account-sound.muted {
+  color: var(--muted);
+  opacity: 0.55;
+}
+
+.shell-account-sound:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.shell-account-sound:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-muted);
+}
+
 .shell-collapsed .shell-account {
   flex-direction: column;
   gap: 8px;
@@ -401,6 +436,11 @@ input {
 }
 
 .shell-collapsed .shell-account-logout {
+  width: 36px;
+  height: 36px;
+}
+
+.shell-collapsed .shell-account-sound {
   width: 36px;
   height: 36px;
 }
