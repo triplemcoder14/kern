@@ -1,0 +1,29 @@
+apiVersion: kern.io/v1alpha1
+kind: KernAlertRule
+metadata:
+  name: prod-latency-warning
+  namespace: kern
+spec:
+  enabled: true
+  type: latency
+  severity: warning
+  threshold:
+    latencyMs: 150
+  match:
+    namespace: default
+  title: Production path latency elevated
+  cause: Custom CRD rule — inspect downstream pods and node saturation.
+---
+apiVersion: kern.io/v1alpha1
+kind: KernAlertRule
+metadata:
+  name: prod-drop-critical
+  namespace: kern
+spec:
+  enabled: true
+  type: drop
+  severity: critical
+  match:
+    pathContains: backend
+  title: Backend path dropping packets
+  cause: Custom CRD rule — check NetworkPolicy and CNI drops on backend talkers.
