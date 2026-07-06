@@ -212,6 +212,20 @@ export class K8sApiClient {
       .sort((a, b) => a.localeCompare(b));
   }
 
+  async getConfigMap(namespace: string, name: string): Promise<Record<string, string> | null> {
+    const response = await this.fetchWithTimeout(
+      `/api/v1/namespaces/${encodeURIComponent(namespace)}/configmaps/${encodeURIComponent(name)}`,
+    );
+    if (response.status === 404) {
+      return null;
+    }
+    if (!response.ok) {
+      throw new Error(`Failed to read ConfigMap ${namespace}/${name} (${response.status})`);
+    }
+    const body = (await response.json()) as { data?: Record<string, string> };
+    return body.data ?? {};
+  }
+
   async listPods(): Promise<K8sPodObject[]> {
     const response = await this.fetchWithTimeout("/api/v1/pods");
     if (!response.ok) {
