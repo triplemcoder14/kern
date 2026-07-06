@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { configToConnectInput, saveClusterConfig, type ClusterConfig } from "../../core/config/cluster-config";
+import { isAlertSoundMuted, setAlertSoundMuted, unlockAlertSound } from "../lib/alert-sound";
 import { AppShell, type NavId, type NavPage } from "../components/AppShell";
 import { AlertsDashboard } from "../components/AlertsDashboard";
 import { FlowsDashboard } from "../components/FlowsDashboard";
@@ -12,6 +13,7 @@ import { TopologyDashboard } from "../components/TopologyDashboard";
 import { WorkloadsDashboard } from "../components/WorkloadsDashboard";
 import { useAuth } from "../hooks/useAuth";
 import { useMonitor } from "../hooks/useMonitor";
+import { useNetworkTalkAlertSound } from "../hooks/useNetworkTalkAlertSound";
 
 export function ConsoleApp() {
   const monitor = useMonitor();
@@ -20,6 +22,17 @@ export function ConsoleApp() {
   const [activeNav, setActiveNav] = useState<NavId>("overview");
   const [namespace, setNamespace] = useState("all");
   const [paused, setPaused] = useState(false);
+  const [soundMuted, setSoundMuted] = useState(isAlertSoundMuted);
+
+  useNetworkTalkAlertSound(monitor.events, soundMuted, monitor.health.connected);
+
+  const handleSoundMutedChange = (muted: boolean) => {
+    setSoundMuted(muted);
+    setAlertSoundMuted(muted);
+    if (!muted) {
+      void unlockAlertSound();
+    }
+  };
 
   const handleConnect = async (config: ClusterConfig) => {
     saveClusterConfig(config);
@@ -51,6 +64,8 @@ export function ConsoleApp() {
       onNavigate={handleNavigate}
       connected={monitor.health.connected}
       alertCount={monitor.openIncidents.length}
+      soundMuted={soundMuted}
+      onSoundMutedChange={handleSoundMutedChange}
       user={user}
       onLogout={handleLogout}
       footer={
@@ -122,6 +137,8 @@ export function ConsoleApp() {
           namespaceFilter={namespace}
           paused={paused}
           onPausedChange={setPaused}
+          soundMuted={soundMuted}
+          onSoundMutedChange={handleSoundMutedChange}
           {...clusterPageProps}
         />
       )}
