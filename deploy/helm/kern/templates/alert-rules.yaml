@@ -1,0 +1,44 @@
+{{- if .Values.alertRules.enabled }}
+{{- range .Values.alertRules.samples }}
+---
+apiVersion: kern.io/v1alpha1
+kind: KernAlertRule
+metadata:
+  name: {{ .name }}
+  namespace: {{ .namespace }}
+spec:
+  enabled: true
+  type: {{ .type | quote }}
+  severity: {{ .severity | quote }}
+  {{- with .threshold }}
+  threshold:
+    {{- if .latencyMs }}
+    latencyMs: {{ .latencyMs }}
+    {{- end }}
+    {{- if .spikeFactor }}
+    spikeFactor: {{ .spikeFactor }}
+    {{- end }}
+    {{- if .minPriorFlows }}
+    minPriorFlows: {{ .minPriorFlows }}
+    {{- end }}
+  {{- end }}
+  {{- with .match }}
+  match:
+    {{- if .namespace }}
+    namespace: {{ .namespace | quote }}
+    {{- end }}
+    {{- if .pathContains }}
+    pathContains: {{ .pathContains | quote }}
+    {{- end }}
+    {{- if .verdict }}
+    verdict: {{ .verdict | quote }}
+    {{- end }}
+  {{- end }}
+  {{- if .title }}
+  title: {{ .title | quote }}
+  {{- end }}
+  {{- if .cause }}
+  cause: {{ .cause | quote }}
+  {{- end }}
+{{- end }}
+{{- end }}
