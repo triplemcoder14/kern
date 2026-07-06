@@ -68,6 +68,10 @@ fi
 
 echo ""
 echo "KERN agent deployed (ProcNet mode)."
+echo ""
+echo "Prefer the operator install for production:"
+echo "  ./scripts/install-kern.sh"
+echo ""
 echo "Port-forward (if not already running):"
 echo "  ./scripts/port-forward-agent.sh"
 echo ""

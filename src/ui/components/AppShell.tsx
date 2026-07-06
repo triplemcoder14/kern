@@ -20,6 +20,8 @@ interface AppShellProps {
   onNavigate: (nav: NavId, page: NavPage) => void;
   connected: boolean;
   alertCount: number;
+  soundMuted?: boolean;
+  onSoundMutedChange?: (muted: boolean) => void;
   user?: AuthUser | null;
   onLogout?: () => Promise<void>;
   children: ReactNode;
@@ -108,6 +110,25 @@ function IconEvents(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+function IconSound(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden {...props}>
+      <path
+        d="M4 8.5h2.5L9 5.5v9L6.5 11.5H4a1 1 0 0 1-1-1v-1a1 1 0 0 1 1-1Z"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M11.5 7.5a4 4 0 0 1 0 5M13.5 5.5a7 7 0 0 1 0 9"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 function IconLogout(props: SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 20 20" fill="none" aria-hidden {...props}>
@@ -171,6 +192,8 @@ export function AppShell({
   onNavigate,
   connected,
   alertCount,
+  soundMuted = false,
+  onSoundMutedChange,
   user,
   onLogout,
   children,
@@ -256,6 +279,22 @@ export function AppShell({
             ) : (
               <span className={`shell-status-dot shell-account-dot ${connected ? "on" : ""}`} />
             )}
+
+            {onSoundMutedChange ? (
+              <button
+                type="button"
+                className={`shell-account-sound${soundMuted ? " muted" : " on"}`}
+                onClick={() => onSoundMutedChange(!soundMuted)}
+                aria-label={soundMuted ? "Unmute talk sounds" : "Mute talk sounds"}
+                title={
+                  soundMuted
+                    ? "Unmute live pod ↔ service talk sounds"
+                    : "Mute live pod ↔ service talk sounds"
+                }
+              >
+                <IconSound className="shell-nav-svg" />
+              </button>
+            ) : null}
 
             {onLogout ? (
               <button

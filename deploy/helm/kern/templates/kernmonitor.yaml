@@ -1,0 +1,13 @@
+{{- if .Values.monitor.enabled }}
+apiVersion: kern.io/v1alpha1
+kind: KernMonitor
+metadata:
+  name: {{ .Values.monitor.name }}
+spec:
+  namespace: {{ .Values.operator.agentNamespace }}
+  agent:
+    image: {{ .Values.agent.image | quote }}
+    mode: {{ .Values.agent.mode | quote }}
+    imagePullPolicy: {{ .Values.agent.imagePullPolicy | quote }}
+    port: {{ .Values.agent.port }}
+{{- end }}

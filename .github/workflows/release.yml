@@ -1,0 +1,79 @@
+# Publish KERN container images and Helm chart to GitHub Container Registry (GHCR).
+#
+# Trigger: push a semver tag, e.g.  v0.1.0
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Artifacts:
+#   ghcr.io/triplemcoder14/kern-agent:<tag>
+#   ghcr.io/triplemcoder14/kern-operator:<tag>
+#   oci://ghcr.io/triplemcoder14/charts/kern:<chart-version>
+#
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: triplemcoder14
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse versions
+        id: versions
+        run: |
+          GIT_TAG="${GITHUB_REF_NAME#v}"
+          CHART_VERSION="$(grep '^version:' deploy/helm/kern/Chart.yaml | awk '{print $2}')"
+          echo "git_tag=${GIT_TAG}" >> "$GITHUB_OUTPUT"
+          echo "chart_version=${CHART_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push agent
+        uses: docker/build-push-action@v6
+        with:
+          context: agent
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/kern-agent:${{ steps.versions.outputs.git_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/kern-agent:latest
+
+      - name: Build and push operator
+        uses: docker/build-push-action@v6
+        with:
+          context: operator
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/kern-operator:${{ steps.versions.outputs.git_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/kern-operator:latest
+
+      - uses: azure/setup-helm@v4
+
+      - name: Package and push Helm chart
+        run: |
+          helm package deploy/helm/kern --version "${{ steps.versions.outputs.chart_version }}" \
+            --app-version "${{ steps.versions.outputs.git_tag }}"
+          helm push "kern-${{ steps.versions.outputs.chart_version }}.tgz" \
+            "oci://${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/charts"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: kern-${{ steps.versions.outputs.chart_version }}.tgz
