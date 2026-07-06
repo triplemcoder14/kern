@@ -8,10 +8,16 @@ import {
   mergeIncident,
 } from "../core/monitoring/incidents";
 import {
+  evaluateDeclarativeFlowAlerts,
   evaluateFlowAlerts,
   incidentFromFlowAlert,
+  mergeFlowAlerts,
   mergeFlowIncident,
 } from "../core/monitoring/flow-alerts";
+import {
+  parseDeclarativeAlertRules,
+  type DeclarativeAlertRule,
+} from "../core/monitoring/declarative-alert-rules";
 import { NetworkIntrospectionEngine } from "../core/monitoring/network-introspection";
 import type {
   MonitorWorkerEvent,
@@ -42,6 +48,8 @@ const EVENT_POLL_INTERVAL_MS = 3_000;
 const SEED_EVENT_LIMIT = 100;
 const DEFAULT_EBPF_URL = "http://127.0.0.1:9474";
 const DEFAULT_K8S_PROXY = "http://127.0.0.1:8001";
+const DEFAULT_ALERT_RULES_NAMESPACE = "kern";
+const DEFAULT_ALERT_RULES_CONFIGMAP = "kern-alert-rules";
 
 function resolveProxyUrl(proxyUrl?: string): string {
   if (proxyUrl?.startsWith("http")) {
@@ -77,6 +85,7 @@ export class MonitorRuntime {
   private networkEngine = new NetworkEngine();
   private lastNetworkSnapshot: NetworkSnapshot | null = null;
   private introspection = new NetworkIntrospectionEngine();
+  private declarativeAlertRules: DeclarativeAlertRule[] = [];
 
   private readonly persistence: MonitorPersistence;
 
@@ -192,6 +201,7 @@ export class MonitorRuntime {
 
     this.client = new K8sApiClient(this.config);
     await this.client.ping();
+    await this.refreshAlertRules();
 
     this.connected = true;
 
@@ -233,6 +243,7 @@ export class MonitorRuntime {
     this.networkEngine.stop();
     this.introspection.reset();
     this.lastNetworkSnapshot = null;
+    this.declarativeAlertRules = [];
     this.connected = false;
     this.config = null;
     this.client = null;
@@ -391,6 +402,22 @@ export class MonitorRuntime {
     }
   }
 
+  private async refreshAlertRules(): Promise<void> {
+    if (!this.client) {
+      return;
+    }
+
+    try {
+      const data = await this.client.getConfigMap(
+        DEFAULT_ALERT_RULES_NAMESPACE,
+        DEFAULT_ALERT_RULES_CONFIGMAP,
+      );
+      this.declarativeAlertRules = parseDeclarativeAlertRules(data?.["rules.json"]);
+    } catch {
+      this.declarativeAlertRules = [];
+    }
+  }
+
   private startWatchers(): void {
     if (!this.client) {
       return;
@@ -405,6 +432,7 @@ export class MonitorRuntime {
 
     this.pollTimer = setInterval(() => {
       void this.pollPodHealth();
+      void this.refreshAlertRules();
     }, POLL_INTERVAL_MS);
   }
 
@@ -531,7 +559,10 @@ export class MonitorRuntime {
 
     await this.persistence.saveNetworkSnapshot?.(snapshot);
 
-    const alerts = evaluateFlowAlerts(snapshot, previous);
+    const alerts = mergeFlowAlerts(
+      evaluateFlowAlerts(snapshot, previous),
+      evaluateDeclarativeFlowAlerts(this.declarativeAlertRules, snapshot, previous),
+    );
     this.lastNetworkSnapshot = snapshot;
 
     for (const alert of alerts) {
