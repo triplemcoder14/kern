@@ -1,0 +1,30 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kern
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/triplemcoder14/kern.git
+    # Pin to a release tag for reproducible installs, e.g. v0.1.0
+    targetRevision: master
+    path: deploy/helm/kern
+    helm:
+      values: |
+        agent:
+          imagePullPolicy: IfNotPresent
+        operator:
+          imagePullPolicy: IfNotPresent
+        alertRules:
+          enabled: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kern-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
