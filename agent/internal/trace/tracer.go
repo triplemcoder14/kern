@@ -2,6 +2,7 @@ package trace
 
 import (
 	"context"
+	"log"
 
 	"github.com/kern/agent/internal/k8s"
 	"github.com/kern/agent/internal/store"
@@ -23,6 +24,12 @@ func NewTracer(mode, hubbleRelay string) Tracer {
 	switch mode {
 	case "hubble":
 		return newHubbleTracer(hubbleRelay)
+	case "ebpf":
+		if tracer := tryEbpfTracer(); tracer != nil {
+			return tracer
+		}
+		log.Printf("ebpf mode requested but unavailable — falling back to proc")
+		return newPlatformTracer("proc")
 	case "auto":
 		return newAutoTracer(hubbleRelay)
 	default:
