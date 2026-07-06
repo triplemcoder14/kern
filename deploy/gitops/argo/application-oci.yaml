@@ -1,0 +1,30 @@
+# Argo CD — pull the published OCI Helm chart (no git clone required).
+# Requires: a prior release tag pushed (see .github/workflows/release.yml).
+#
+#   kubectl apply -f deploy/gitops/argo/application-oci.yaml
+#
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kern
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: ghcr.io/triplemcoder14/charts
+    chart: kern
+    targetRevision: 0.1.0
+    helm:
+      values: |
+        alertRules:
+          enabled: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kern-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
