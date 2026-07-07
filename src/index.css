@@ -4394,7 +4394,7 @@ tbody tr.selected {
 
 .profile-table-head-memory,
 .profile-table-row-memory {
-  grid-template-columns: 1.1fr 0.9fr 0.6fr 0.6fr;
+  grid-template-columns: 1.1fr 0.8fr 0.5fr 0.5fr 0.5fr;
 }
 
 .profile-table-row-button {
