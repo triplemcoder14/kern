@@ -50,6 +50,7 @@ const DEFAULT_EBPF_URL = "http://127.0.0.1:9474";
 const DEFAULT_K8S_PROXY = "http://127.0.0.1:8001";
 const DEFAULT_ALERT_RULES_NAMESPACE = "kern";
 const DEFAULT_ALERT_RULES_CONFIGMAP = "kern-alert-rules";
+const AGENT_PROFILE_TIMEOUT_MS = 2_500;
 
 function resolveProxyUrl(proxyUrl?: string): string {
   if (proxyUrl?.startsWith("http")) {
@@ -67,6 +68,18 @@ function resolveEbpfUrl(ebpfCollectorUrl?: string): string {
 
 function resolveOrigin(origin?: string, fallback = ""): string {
   return origin ?? fallback;
+}
+
+function parseAgentPort(url: string): number {
+  try {
+    const parsed = new URL(url);
+    if (parsed.port) {
+      return Number.parseInt(parsed.port, 10);
+    }
+    return parsed.protocol === "https:" ? 443 : 9474;
+  } catch {
+    return 9474;
+  }
 }
 
 export class MonitorRuntime {
@@ -631,11 +644,13 @@ export class MonitorRuntime {
     this.emit({ type: "HEALTH_UPDATE", snapshot: this.buildHealthSnapshot() });
   }
 
-  private async fetchAgentProfile(): Promise<AgentProfilePayload | null> {
-    const ebpfUrl = resolveEbpfUrl(this.config?.ebpfCollectorUrl);
+  private async fetchAgentProfileFromUrl(baseUrl: string): Promise<AgentProfilePayload | null> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), AGENT_PROFILE_TIMEOUT_MS);
     try {
-      const response = await fetch(`${ebpfUrl.replace(/\/$/, "")}/api/v1/profile`, {
+      const response = await fetch(`${baseUrl.replace(/\/$/, "")}/api/v1/profile`, {
         headers: { Accept: "application/json" },
+        signal: controller.signal,
       });
       if (!response.ok) {
         return null;
@@ -644,7 +659,42 @@ export class MonitorRuntime {
       return body.profile ?? null;
     } catch {
       return null;
+    } finally {
+      clearTimeout(timer);
     }
+  }
+
+  private async fetchAllAgentProfiles(): Promise<Map<string, AgentProfilePayload>> {
+    const profiles = new Map<string, AgentProfilePayload>();
+    const baseUrl = resolveEbpfUrl(this.config?.ebpfCollectorUrl);
+    const port = parseAgentPort(baseUrl);
+
+    const primary = await this.fetchAgentProfileFromUrl(baseUrl);
+    if (primary?.node_name) {
+      profiles.set(primary.node_name, primary);
+    }
+
+    if (!this.client) {
+      return profiles;
+    }
+
+    const nodes = await this.client.listNodes();
+    await Promise.all(
+      nodes.map(async (node) => {
+        if (profiles.has(node.name)) {
+          return;
+        }
+        for (const ip of node.internalIPs) {
+          const profile = await this.fetchAgentProfileFromUrl(`http://${ip}:${port}`);
+          if (profile?.node_name) {
+            profiles.set(profile.node_name, profile);
+            return;
+          }
+        }
+      }),
+    );
+
+    return profiles;
   }
 
   private async getProfile(nodeName?: string): Promise<ProfileSnapshot> {
@@ -655,10 +705,11 @@ export class MonitorRuntime {
       };
     }
 
-    const [nodes, pods, agentProfile] = await Promise.all([
+    const [nodes, pods, agentProfiles, nodeMetrics] = await Promise.all([
       this.client.listNodes(),
       this.client.listPodsOnNodes(),
-      this.fetchAgentProfile(),
+      this.fetchAllAgentProfiles(),
+      this.client.listNodeMetrics().catch(() => new Map()),
     ]);
 
     return buildProfileSnapshot({
@@ -666,7 +717,8 @@ export class MonitorRuntime {
       pods,
       network: this.networkEngine.getSnapshot(),
       events: this.events,
-      agentProfile,
+      agentProfiles,
+      nodeMetrics,
       selectedNode: nodeName,
     });
   }
