@@ -20,7 +20,7 @@ const EMPTY_NETWORK: NetworkSnapshot = {
 const EMPTY_HEALTH: ClusterHealthSnapshot = {
   health: "disconnected",
   connected: false,
-  clusterName: "disconnected",
+  clusterName: "minikube",
   podCount: 0,
   runningPods: 0,
   failedPods: 0,

@@ -112,30 +112,19 @@ func buildStack(paths map[string]*pathAgg) []StackFrame {
 		{Label: "network stack", Depth: 0, Width: 1, Offset: 0, Heat: 0.15},
 	}
 
-	rowWidth := 1.0
-	offset := 0.0
 	for index, item := range items {
-		width := 0.35 + (float64(item.latency)/float64(maxLatency))*0.55
-		if width > rowWidth {
-			width = rowWidth
-		}
+		width := 0.45 + (float64(item.latency)/float64(maxLatency))*0.5
 		heat := float64(item.latency) / float64(maxLatency)
 		if item.drops > 0 {
 			heat = min(1, heat+0.25)
 		}
 		stack = append(stack, StackFrame{
 			Label:  item.label,
-			Depth:  1 + (index % 2),
+			Depth:  1 + index,
 			Width:  width,
-			Offset: offset,
+			Offset: 0.02,
 			Heat:   heat,
 		})
-		offset += width * 0.55
-		rowWidth -= width * 0.45
-		if rowWidth < 0.15 {
-			rowWidth = 0.15
-			offset = 0
-		}
 	}
 
 	return stack
