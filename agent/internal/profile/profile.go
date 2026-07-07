@@ -122,6 +122,11 @@ type Collector interface {
 	Snapshot(flows *store.FlowStore) Snapshot
 }
 
-func NewCollector() Collector {
-	return newPlatformCollector()
+// PodLookup resolves pod identity from a Kubernetes pod UID when kubelet metadata is unavailable.
+type PodLookup interface {
+	LookupPodByUID(uid string) (namespace, name string, ok bool)
+}
+
+func NewCollector(lookup PodLookup) Collector {
+	return newPlatformCollector(lookup)
 }

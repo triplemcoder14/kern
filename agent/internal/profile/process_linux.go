@@ -14,6 +14,14 @@ import (
 
 const userHZ = 100.0
 
+var kubeletPodsDir = "/var/lib/kubelet/pods"
+
+func init() {
+	if dir := os.Getenv("KUBELET_PODS_DIR"); dir != "" {
+		kubeletPodsDir = dir
+	}
+}
+
 type procSample struct {
 	pid       int
 	name      string
@@ -109,7 +117,7 @@ func scanProcesses() []procSample {
 		if stat.name == "kern-agent" {
 			continue
 		}
-		ns, pod := parsePodFromCgroup(pid)
+		ns, pod := c.resolvePodFromPID(pid)
 		samples = append(samples, procSample{
 			pid:       pid,
 			name:      stat.name,
@@ -153,7 +161,7 @@ func readProcStat(pid int) (procStatData, bool) {
 	return procStatData{name: name, utime: utime, stime: stime, rss: rss}, true
 }
 
-func parsePodFromCgroup(pid int) (namespace, pod string) {
+func (c *platformCollector) resolvePodFromPID(pid int) (namespace, pod string) {
 	file, err := os.Open(filepath.Join("/proc", strconv.Itoa(pid), "cgroup"))
 	if err != nil {
 		return "", ""
@@ -164,9 +172,13 @@ func parsePodFromCgroup(pid int) (namespace, pod string) {
 	for scanner.Scan() {
 		line := scanner.Text()
 		for _, podUID := range podUIDCandidates(line) {
-			nsName, podName, ok := readKubeletPodMeta(podUID)
-			if ok {
+			if nsName, podName, ok := readKubeletPodMeta(podUID); ok {
 				return nsName, podName
+			}
+			if c.podLookup != nil {
+				if nsName, podName, ok := c.podLookup.LookupPodByUID(podUID); ok {
+					return nsName, podName
+				}
 			}
 		}
 	}
@@ -215,7 +227,7 @@ func formatPodUID(raw string) string {
 }
 
 func readKubeletPodMeta(podUID string) (namespace, pod string, ok bool) {
-	base := filepath.Join("/var/lib/kubelet/pods", podUID, "metadata")
+	base := filepath.Join(kubeletPodsDir, podUID, "metadata")
 	podName, err := os.ReadFile(filepath.Join(base, "name"))
 	if err != nil {
 		return "", "", false
