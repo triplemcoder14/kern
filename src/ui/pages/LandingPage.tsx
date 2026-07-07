@@ -175,10 +175,10 @@ export function LandingPage() {
         <section className="landing-hero">
           <div className="landing-wrap landing-hero-grid">
             <div className="landing-hero-copy">
-              <h1 className="landing-headline">See every connection inside Kubernetes.</h1>
+              <h1 className="landing-headline">Kernel observability for Kubernetes.</h1>
               <p className="landing-lede">
-                Self-hosted eBPF observability for Kubernetes — deploy on your laptop, VM, or
-                cluster, then sign in to your local console.
+                Self-hosted eBPF profiling that lets you investigate CPU, memory, networking, and
+                kernel behavior—from pod to kernel stack.
               </p>
 
               <div className="landing-hero-actions">

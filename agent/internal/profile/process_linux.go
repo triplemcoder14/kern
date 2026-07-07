@@ -33,7 +33,7 @@ type procSample struct {
 
 func (c *platformCollector) collectProcessSamples(limit int) []ProcessSample {
 	now := time.Now()
-	current := scanProcesses()
+	current := c.scanProcesses()
 	if len(current) == 0 {
 		return nil
 	}
@@ -95,7 +95,7 @@ func (c *platformCollector) collectProcessSamples(limit int) []ProcessSample {
 	return out
 }
 
-func scanProcesses() []procSample {
+func (c *platformCollector) scanProcesses() []procSample {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return nil
