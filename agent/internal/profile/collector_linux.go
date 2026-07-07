@@ -42,8 +42,9 @@ func (c *platformCollector) Snapshot(flows *store.FlowStore) Snapshot {
 	processes := c.collectProcessSamples(15)
 	topPods := aggregateTopPods(processes, 8)
 	kernelMem := readKernelMemory(memDetail, memUsed, memTotal)
-	cpuStack := buildCPUStack(processes, network)
-	hotspots := buildKernelHotspots(processes, network)
+	cpuStack, stackSource := buildCPUStack(processes, network)
+	kernelFrames := kernelFrameLabels(cpuStack, stackSource)
+	hotspots := buildKernelHotspots(processes, network, kernelFrames, stackSource)
 	timeline := buildTimeline(psi, memDetail, cpuPercent, processes)
 
 	return Snapshot{
@@ -65,6 +66,7 @@ func (c *platformCollector) Snapshot(flows *store.FlowStore) Snapshot {
 		TopProcesses:   processes,
 		KernelHotspots: hotspots,
 		CPUStack:       cpuStack,
+		StackSource:    stackSource,
 		Timeline:       timeline,
 		SampledAt:      time.Now().UTC(),
 	}
@@ -185,4 +187,17 @@ func envOr(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func kernelFrameLabels(stack []StackFrame, stackSource string) []string {
+	if stackSource != "proc" {
+		return nil
+	}
+	labels := make([]string, 0, len(stack))
+	for _, frame := range stack {
+		if frame.Depth >= 3 {
+			labels = append(labels, frame.Label)
+		}
+	}
+	return labels
 }

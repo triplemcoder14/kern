@@ -79,6 +79,8 @@ export interface ProfileMetric {
   sparkline: number[];
 }
 
+export type ProfileStackSource = "proc" | "inferred" | "ebpf";
+
 export interface ProfileStackFrame {
   label: string;
   depth: number;
@@ -109,6 +111,7 @@ export interface NodeProfileDetail {
   metrics: ProfileMetric[];
   stack: ProfileStackFrame[];
   cpuStack: ProfileStackFrame[];
+  stackSource?: ProfileStackSource;
   log: ProfileLogLine[];
   psi: PSISnapshot;
   memoryDetail: MemoryDetail;
@@ -180,6 +183,7 @@ export interface AgentProfilePayload {
     meaning?: string;
   }>;
   cpu_stack?: ProfileStackFrame[];
+  stack_source?: ProfileStackSource;
   timeline?: Array<{
     timestamp: string;
     title: string;
