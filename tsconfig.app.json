@@ -20,7 +20,10 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "erasableSyntaxOnly": true,
-    "noFallthroughCasesInSwitch": true
+    "noFallthroughCasesInSwitch": true,
+    "paths": {
+      "@kern/platform": ["./packages/platform/src/index.ts"]
+    }
   },
-  "include": ["src"]
+  "include": ["src", "packages/platform/src"]
 }

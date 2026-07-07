@@ -1,12 +1,17 @@
 # Publish KERN container images and Helm chart to GitHub Container Registry (GHCR).
 #
-# Trigger: push a semver tag, e.g.  v0.1.0
-#   git tag v0.1.0 && git push origin v0.1.0
+# Trigger: push a semver tag, e.g.  v0.6.0
+#   git tag v0.6.0 && git push origin v0.6.0
 #
 # Artifacts:
 #   ghcr.io/triplemcoder14/kern-agent:<tag>
 #   ghcr.io/triplemcoder14/kern-operator:<tag>
+#   ghcr.io/triplemcoder14/kern-api:<tag>
+#   ghcr.io/triplemcoder14/kern-web:<tag>
 #   oci://ghcr.io/triplemcoder14/charts/kern:<chart-version>
+#
+# After release: set each GHCR package to Public (Package settings → Change visibility)
+# so clusters can pull without registry credentials.
 #
 name: Release
 
@@ -49,6 +54,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: agent
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/kern-agent:${{ steps.versions.outputs.git_tag }}
@@ -58,10 +64,33 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: operator
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/kern-operator:${{ steps.versions.outputs.git_tag }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/kern-operator:latest
+
+      - name: Build and push console API
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.api-self-hosted
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/kern-api:${{ steps.versions.outputs.git_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/kern-api:latest
+
+      - name: Build and push console web
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.web-self-hosted
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/kern-web:${{ steps.versions.outputs.git_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/kern-web:latest
 
       - uses: azure/setup-helm@v4
 
@@ -77,3 +106,20 @@ jobs:
         with:
           generate_release_notes: true
           files: kern-${{ steps.versions.outputs.chart_version }}.tgz
+          body: |
+            ## Container images (GHCR)
+
+            | Image | Pull |
+            |-------|------|
+            | Agent | `docker pull ghcr.io/triplemcoder14/kern-agent:${{ steps.versions.outputs.git_tag }}` |
+            | Operator | `docker pull ghcr.io/triplemcoder14/kern-operator:${{ steps.versions.outputs.git_tag }}` |
+            | Console API | `docker pull ghcr.io/triplemcoder14/kern-api:${{ steps.versions.outputs.git_tag }}` |
+            | Console Web | `docker pull ghcr.io/triplemcoder14/kern-web:${{ steps.versions.outputs.git_tag }}` |
+
+            ## Helm chart
+
+            ```bash
+            helm install kern oci://ghcr.io/triplemcoder14/charts/kern --version ${{ steps.versions.outputs.chart_version }}
+            ```
+
+            Make each new GHCR package **public** after the first publish (Package settings → Change visibility).
