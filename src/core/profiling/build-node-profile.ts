@@ -1,20 +1,116 @@
+import type { K8sNodeResourceMetrics, K8sNodeSummary } from "../k8s-api/client";
 import type { MonitorEvent } from "../types/monitoring";
 import type { NetworkFlow, NetworkSnapshot } from "../types/network";
 import type {
   AgentProfilePayload,
+  KernelHotspot,
+  KernelMemory,
+  MemoryDetail,
   NodeHealth,
   NodeProfileDetail,
   NodeProfileSummary,
+  PodConsumer,
+  ProcessSample,
   ProfileLogLine,
+  ProfileMetric,
   ProfileSnapshot,
   ProfileStackFrame,
+  PSILevel,
+  PSISnapshot,
+  TimelineEvent,
 } from "../types/profiling";
 
-interface K8sNodeRow {
-  name: string;
-  zone?: string;
-  cpuCores?: number;
-  ready: boolean;
+function normalizePSILevel(value?: string): PSILevel {
+  if (value === "warn" || value === "critical") {
+    return value;
+  }
+  return "normal";
+}
+
+function mapPSI(agent?: AgentProfilePayload): PSISnapshot {
+  return {
+    cpuLevel: normalizePSILevel(agent?.psi?.cpu_level),
+    memoryLevel: normalizePSILevel(agent?.psi?.memory_level),
+    cpuAvg10: agent?.psi?.cpu_avg10,
+    memoryAvg10: agent?.psi?.memory_avg10,
+  };
+}
+
+function mapMemoryDetail(agent?: AgentProfilePayload): MemoryDetail {
+  return {
+    cacheMb: agent?.memory_detail?.cache_mb,
+    slabMb: agent?.memory_detail?.slab_mb,
+    buffersMb: agent?.memory_detail?.buffers_mb,
+    swapUsedMb: agent?.memory_detail?.swap_used_mb,
+    reclaimActivity: agent?.memory_detail?.reclaim_activity,
+    majorFaultsPerMin: agent?.memory_detail?.major_faults_per_min,
+    oomEvents: agent?.memory_detail?.oom_events,
+  };
+}
+
+function mapKernelMemory(agent?: AgentProfilePayload): KernelMemory {
+  return {
+    slabGrowth: agent?.kernel_memory?.slab_growth,
+    dentryCache: agent?.kernel_memory?.dentry_cache,
+    tcpBuffers: agent?.kernel_memory?.tcp_buffers,
+    pageReclaim: agent?.kernel_memory?.page_reclaim,
+  };
+}
+
+function mapTopPods(agent?: AgentProfilePayload): PodConsumer[] {
+  return (agent?.top_pods ?? []).map((pod) => ({
+    namespace: pod.namespace,
+    pod: pod.pod,
+    cpuPercent: pod.cpu_percent,
+    rssMb: pod.rss_mb,
+    cacheMb: pod.cache_mb,
+    pageFaultsPerMin: pod.page_faults_per_min,
+  }));
+}
+
+function mapTopProcesses(agent?: AgentProfilePayload): ProcessSample[] {
+  return (agent?.top_processes ?? []).map((proc) => ({
+    pid: proc.pid,
+    name: proc.name,
+    namespace: proc.namespace,
+    pod: proc.pod,
+    cpuPercent: proc.cpu_percent,
+    rssMb: proc.rss_mb,
+  }));
+}
+
+function mapKernelHotspots(agent?: AgentProfilePayload): KernelHotspot[] {
+  return (agent?.kernel_hotspots ?? []).map((hotspot) => ({
+    function: hotspot.function,
+    share: hotspot.share,
+    meaning: hotspot.meaning,
+  }));
+}
+
+function mapTimeline(agent?: AgentProfilePayload): TimelineEvent[] {
+  return (agent?.timeline ?? []).map((event) => ({
+    timestamp: event.timestamp,
+    title: event.title,
+    detail: event.detail,
+    severity: event.severity === "crit" ? "crit" : event.severity === "warn" ? "warn" : "info",
+  }));
+}
+
+function psiTone(level: PSILevel): "ok" | "warn" | "bad" {
+  if (level === "critical") {
+    return "bad";
+  }
+  if (level === "warn") {
+    return "warn";
+  }
+  return "ok";
+}
+
+function formatPSI(level: PSILevel, avg10?: number): string {
+  if (avg10 !== undefined) {
+    return `${level} (${avg10.toFixed(1)})`;
+  }
+  return level;
 }
 
 interface PodOnNode {
@@ -126,6 +222,54 @@ function buildSparkline(values: number[]): number[] {
   return recent.map((value) => Math.max(4, Math.round(20 - (value / max) * 14)));
 }
 
+function cpuPercentFromMetrics(node: K8sNodeSummary, metrics?: K8sNodeResourceMetrics): number | undefined {
+  if (!metrics?.cpuUsageNano || !node.cpuCores || node.cpuCores <= 0) {
+    return undefined;
+  }
+  return Math.min(100, (metrics.cpuUsageNano / (node.cpuCores * 1_000_000_000)) * 100);
+}
+
+function memoryFromMetrics(
+  node: K8sNodeSummary,
+  metrics?: K8sNodeResourceMetrics,
+): { usedMb?: number; totalMb?: number } {
+  const usedMb = metrics?.memoryUsedKi ? Math.round(metrics.memoryUsedKi / 1024) : undefined;
+  const totalMb = node.memoryTotalMb;
+  return { usedMb, totalMb };
+}
+
+function resolveAgentForNode(
+  node: K8sNodeSummary,
+  agentProfiles: Map<string, AgentProfilePayload>,
+  nodeMetrics: Map<string, K8sNodeResourceMetrics>,
+): { agent?: AgentProfilePayload; agentLive: boolean } {
+  const agent = agentProfiles.get(node.name);
+  if (agent?.sampled_at) {
+    return { agent, agentLive: true };
+  }
+
+  const metrics = nodeMetrics.get(node.name);
+  const cpuPercent = cpuPercentFromMetrics(node, metrics);
+  const memory = memoryFromMetrics(node, metrics);
+  if (cpuPercent === undefined && memory.usedMb === undefined) {
+    return { agent: undefined, agentLive: false };
+  }
+
+  return {
+    agent: {
+      node_name: node.name,
+      zone: node.zone,
+      cpu_cores: node.cpuCores,
+      cpu_percent: cpuPercent,
+      memory_used_mb: memory.usedMb,
+      memory_total_mb: memory.totalMb,
+      health: deriveHealth({ p50: undefined, p95: undefined, drops: 0, flowsPerSecond: 0 }, cpuPercent, node.ready),
+      sampled_at: new Date().toISOString(),
+    },
+    agentLive: false,
+  };
+}
+
 function buildStack(flows: NetworkFlow[], agentStack?: ProfileStackFrame[]): ProfileStackFrame[] {
   if (agentStack && agentStack.length > 0) {
     return agentStack;
@@ -217,19 +361,115 @@ function buildLog(flows: NetworkFlow[], events: MonitorEvent[], agentLog?: Profi
 }
 
 function buildDetail(
-  node: K8sNodeRow,
+  node: K8sNodeSummary,
   flows: NetworkFlow[],
   events: MonitorEvent[],
   agent?: AgentProfilePayload,
   agentLive = false,
 ): NodeProfileDetail {
   const metrics = networkMetrics(flows, agent?.network);
+  const cpuPercent = agent?.cpu_percent;
   const health = agent?.health
     ? normalizeHealth(agent.health)
-    : deriveHealth(metrics, agent?.cpu_percent, node.ready);
+    : deriveHealth(metrics, cpuPercent, node.ready);
+
   const latencies = flows
     .map((flow) => flow.latencyMs)
     .filter((value): value is number => value !== undefined);
+
+  const profileMetrics: ProfileMetric[] = [];
+
+  if (cpuPercent !== undefined) {
+    profileMetrics.push({
+      label: "CPU",
+      value: `${cpuPercent.toFixed(1)}%`,
+      tone: cpuPercent >= 85 ? "warn" : "ok",
+      sparkline: buildSparkline([cpuPercent, cpuPercent * 0.95, cpuPercent * 1.02, cpuPercent, cpuPercent * 0.98, cpuPercent]),
+    });
+  }
+
+  if (agent?.memory_used_mb !== undefined && agent.memory_total_mb !== undefined) {
+    const memoryPct = agent.memory_total_mb > 0
+      ? (agent.memory_used_mb / agent.memory_total_mb) * 100
+      : 0;
+    profileMetrics.push({
+      label: "Memory",
+      value: `${Math.round(memoryPct)}%`,
+      tone: memoryPct >= 90 ? "warn" : "ok",
+      sparkline: buildSparkline([memoryPct, memoryPct * 0.98, memoryPct * 1.01, memoryPct, memoryPct, memoryPct]),
+    });
+  }
+
+  const psi = mapPSI(agent);
+  const memoryDetail = mapMemoryDetail(agent);
+  const kernelMemory = mapKernelMemory(agent);
+  const topPods = mapTopPods(agent);
+  const topProcesses = mapTopProcesses(agent);
+  const kernelHotspots = mapKernelHotspots(agent);
+  const timeline = mapTimeline(agent);
+  const cpuStack = agent?.cpu_stack && agent.cpu_stack.length > 0
+    ? agent.cpu_stack
+    : buildStack(flows, agent?.network?.stack);
+
+  if (psi.cpuLevel !== "normal" || psi.memoryLevel !== "normal") {
+    profileMetrics.push(
+      {
+        label: "PSI CPU",
+        value: formatPSI(psi.cpuLevel, psi.cpuAvg10),
+        tone: psiTone(psi.cpuLevel),
+        sparkline: buildSparkline([psi.cpuAvg10 ?? 0, psi.cpuAvg10 ?? 0, psi.cpuAvg10 ?? 0, psi.cpuAvg10 ?? 0, psi.cpuAvg10 ?? 0, psi.cpuAvg10 ?? 0]),
+      },
+      {
+        label: "PSI Mem",
+        value: formatPSI(psi.memoryLevel, psi.memoryAvg10),
+        tone: psiTone(psi.memoryLevel),
+        sparkline: buildSparkline([psi.memoryAvg10 ?? 0, psi.memoryAvg10 ?? 0, psi.memoryAvg10 ?? 0, psi.memoryAvg10 ?? 0, psi.memoryAvg10 ?? 0, psi.memoryAvg10 ?? 0]),
+      },
+    );
+  }
+
+  if (memoryDetail.slabMb !== undefined) {
+    profileMetrics.push({
+      label: "Slab",
+      value: `${memoryDetail.slabMb}MB`,
+      tone: (memoryDetail.slabMb ?? 0) >= 1024 ? "warn" : "ok",
+      sparkline: buildSparkline([memoryDetail.slabMb, memoryDetail.slabMb, memoryDetail.slabMb, memoryDetail.slabMb, memoryDetail.slabMb, memoryDetail.slabMb]),
+    });
+  }
+
+  profileMetrics.push(
+    {
+      label: "P50",
+      value: formatMs(metrics.p50),
+      tone: (metrics.p50 ?? 0) >= 80 ? "warn" : "ok",
+      sparkline: buildSparkline(latencies.map((value) => value)),
+    },
+    {
+      label: "P95",
+      value: formatMs(metrics.p95),
+      tone: (metrics.p95 ?? 0) >= 150 ? "warn" : (metrics.p95 ?? 0) >= 80 ? "warn" : "ok",
+      sparkline: buildSparkline(latencies.map((value) => value * 1.2)),
+    },
+    {
+      label: "Drops",
+      value: String(metrics.drops),
+      tone: metrics.drops > 0 ? "bad" : "ok",
+      sparkline: buildSparkline([metrics.drops, metrics.drops, metrics.drops, metrics.drops, metrics.drops, metrics.drops]),
+    },
+    {
+      label: "Flows/s",
+      value: metrics.flowsPerSecond >= 1000 ? `${(metrics.flowsPerSecond / 1000).toFixed(1)}k` : String(metrics.flowsPerSecond),
+      tone: "neutral",
+      sparkline: buildSparkline([
+        metrics.flowsPerSecond,
+        metrics.flowsPerSecond,
+        metrics.flowsPerSecond,
+        metrics.flowsPerSecond,
+        metrics.flowsPerSecond,
+        metrics.flowsPerSecond,
+      ]),
+    },
+  );
 
   return {
     name: node.name,
@@ -237,77 +477,61 @@ function buildDetail(
     cpuCores: agent?.cpu_cores ?? node.cpuCores,
     health,
     agentLive,
-    cpuPercent: agent?.cpu_percent,
+    cpuPercent,
     memoryUsedMb: agent?.memory_used_mb,
-    memoryTotalMb: agent?.memory_total_mb,
+    memoryTotalMb: agent?.memory_total_mb ?? node.memoryTotalMb,
+    load1: agent?.load_1,
     sampleSeconds: 3,
-    metrics: [
-      {
-        label: "P50",
-        value: formatMs(metrics.p50),
-        tone: (metrics.p50 ?? 0) >= 80 ? "warn" : "ok",
-        sparkline: buildSparkline(latencies.map((value) => value)),
-      },
-      {
-        label: "P95",
-        value: formatMs(metrics.p95),
-        tone: (metrics.p95 ?? 0) >= 150 ? "warn" : (metrics.p95 ?? 0) >= 80 ? "warn" : "ok",
-        sparkline: buildSparkline(latencies.map((value) => value * 1.2)),
-      },
-      {
-        label: "Drops",
-        value: String(metrics.drops),
-        tone: metrics.drops > 0 ? "bad" : "ok",
-        sparkline: buildSparkline([metrics.drops, metrics.drops, metrics.drops, metrics.drops, metrics.drops, metrics.drops]),
-      },
-      {
-        label: "Flows/s",
-        value: metrics.flowsPerSecond >= 1000 ? `${(metrics.flowsPerSecond / 1000).toFixed(1)}k` : String(metrics.flowsPerSecond),
-        tone: "neutral",
-        sparkline: buildSparkline([
-          metrics.flowsPerSecond,
-          metrics.flowsPerSecond,
-          metrics.flowsPerSecond,
-          metrics.flowsPerSecond,
-          metrics.flowsPerSecond,
-          metrics.flowsPerSecond,
-        ]),
-      },
-    ],
+    metrics: profileMetrics,
     stack: buildStack(flows, agent?.network?.stack),
+    cpuStack,
     log: buildLog(flows, events, agent?.network?.log),
+    psi,
+    memoryDetail,
+    kernelMemory,
+    topPods,
+    topProcesses,
+    kernelHotspots,
+    timeline,
   };
 }
 
 export function buildProfileSnapshot(input: {
-  nodes: K8sNodeRow[];
+  nodes: K8sNodeSummary[];
   pods: PodOnNode[];
   network: NetworkSnapshot;
   events: MonitorEvent[];
-  agentProfile?: AgentProfilePayload | null;
+  agentProfiles?: Map<string, AgentProfilePayload>;
+  nodeMetrics?: Map<string, K8sNodeResourceMetrics>;
   selectedNode?: string;
 }): ProfileSnapshot {
   const podMap = podsOnNodeMap(input.pods);
-  const agentNode = input.agentProfile?.node_name;
-  const agentLive = Boolean(input.agentProfile?.sampled_at);
+  const agentProfiles = input.agentProfiles ?? new Map<string, AgentProfilePayload>();
+  const nodeMetrics = input.nodeMetrics ?? new Map<string, K8sNodeResourceMetrics>();
 
   const summaries: NodeProfileSummary[] = input.nodes.map((node) => {
     const nodeFlows = flowsForNode(input.network.flows, podMap.get(node.name) ?? new Set());
-    const agentSlice =
-      agentLive && agentNode === node.name ? input.agentProfile ?? undefined : undefined;
-    const metrics = networkMetrics(nodeFlows, agentSlice?.network);
-    const health = agentSlice?.health
-      ? normalizeHealth(agentSlice.health)
-      : deriveHealth(metrics, agentSlice?.cpu_percent, node.ready);
+    const { agent, agentLive } = resolveAgentForNode(node, agentProfiles, nodeMetrics);
+    const metrics = networkMetrics(nodeFlows, agent?.network);
+    const health = agent?.health
+      ? normalizeHealth(agent.health)
+      : deriveHealth(metrics, agent?.cpu_percent, node.ready);
+
+    const psi = mapPSI(agent);
 
     return {
       name: node.name,
-      zone: agentSlice?.zone ?? node.zone,
-      cpuCores: agentSlice?.cpu_cores ?? node.cpuCores,
+      zone: agent?.zone ?? node.zone,
+      cpuCores: agent?.cpu_cores ?? node.cpuCores,
       health,
       p95Ms: metrics.p95,
       drops: metrics.drops,
-      agentLive: agentLive && agentNode === node.name,
+      agentLive,
+      cpuPercent: agent?.cpu_percent,
+      memoryUsedMb: agent?.memory_used_mb,
+      memoryTotalMb: agent?.memory_total_mb ?? node.memoryTotalMb,
+      psiCpuLevel: psi.cpuLevel,
+      psiMemoryLevel: psi.memoryLevel,
     };
   });
 
@@ -328,15 +552,8 @@ export function buildProfileSnapshot(input: {
 
   if (selectedRow) {
     const nodeFlows = flowsForNode(input.network.flows, podMap.get(selectedRow.name) ?? new Set());
-    const agentSlice =
-      agentLive && agentNode === selectedRow.name ? input.agentProfile ?? undefined : undefined;
-    selected = buildDetail(
-      selectedRow,
-      nodeFlows,
-      input.events,
-      agentSlice,
-      Boolean(agentSlice),
-    );
+    const { agent, agentLive } = resolveAgentForNode(selectedRow, agentProfiles, nodeMetrics);
+    selected = buildDetail(selectedRow, nodeFlows, input.events, agent, agentLive);
   }
 
   return {
