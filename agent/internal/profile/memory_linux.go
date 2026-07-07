@@ -47,6 +47,9 @@ func readMemoryDetail() MemoryDetail {
 	}
 
 	detail.MajorFaultsPerMin = readVmStatCounter("pgmajfault") / 5
+	if oomKills := readVmStatCounter("oom_kill"); oomKills <= uint64(^uint32(0)) {
+		detail.OOMEvents = uint32(oomKills)
+	}
 	return detail
 }
 
