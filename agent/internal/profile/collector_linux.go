@@ -14,8 +14,10 @@ import (
 )
 
 type platformCollector struct {
-	prevIdle  uint64
-	prevTotal uint64
+	prevIdle        uint64
+	prevTotal       uint64
+	prevProcTicks  map[int]uint64
+	prevProcSample time.Time
 }
 
 func newPlatformCollector() Collector {
@@ -34,6 +36,14 @@ func (c *platformCollector) Snapshot(flows *store.FlowStore) Snapshot {
 	load1 := readLoad1()
 	memUsed, memTotal := readMemory()
 	network := buildNetworkProfile(flows)
+	psi := readPSI()
+	memDetail := readMemoryDetail()
+	processes := c.collectProcessSamples(15)
+	topPods := aggregateTopPods(processes, 8)
+	kernelMem := readKernelMemory(memDetail, memUsed, memTotal)
+	cpuStack := buildCPUStack(processes, network)
+	hotspots := buildKernelHotspots(processes, network)
+	timeline := buildTimeline(psi, memDetail, cpuPercent, processes)
 
 	return Snapshot{
 		NodeName:       nodeName,
@@ -44,14 +54,30 @@ func (c *platformCollector) Snapshot(flows *store.FlowStore) Snapshot {
 		Load1:          load1,
 		MemoryUsedMB:   memUsed,
 		MemoryTotalMB:  memTotal,
-		Health:         deriveHealth(network, cpuPercent, load1, cores),
+		Health:         deriveHealthWithPSI(network, cpuPercent, load1, cores, psi, memDetail),
 		FlowsPerSecond: flows.FlowsPerSecond(),
 		Network:        network,
+		PSI:            psi,
+		Memory:         memDetail,
+		KernelMemory:   kernelMem,
+		TopPods:        topPods,
+		TopProcesses:   processes,
+		KernelHotspots: hotspots,
+		CPUStack:       cpuStack,
+		Timeline:       timeline,
 		SampledAt:      time.Now().UTC(),
 	}
 }
 
 func (c *platformCollector) readCPUPercent() float64 {
+	if c.prevTotal == 0 {
+		_ = c.sampleCPU()
+		time.Sleep(200 * time.Millisecond)
+	}
+	return c.sampleCPU()
+}
+
+func (c *platformCollector) sampleCPU() float64 {
 	file, err := os.Open("/proc/stat")
 	if err != nil {
 		return 0
@@ -79,6 +105,10 @@ func (c *platformCollector) readCPUPercent() float64 {
 	if c.prevTotal == 0 {
 		c.prevIdle = idle
 		c.prevTotal = total
+		cores := runtime.NumCPU()
+		if cores > 0 {
+			return min(100, (readLoad1()/float64(cores))*100)
+		}
 		return 0
 	}
 
