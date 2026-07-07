@@ -9,6 +9,7 @@ import type {
   ProfileLogLine,
   ProfileMetric,
   ProfileStackFrame,
+  ProfileStackSource,
   TimelineEvent,
 } from "../../core/types/profiling";
 import { PageHeader } from "./PageHeader";
@@ -26,6 +27,26 @@ interface ProfilingDashboardProps {
 }
 
 type ProfilerTab = "overview" | "cpu" | "memory" | "network" | "timeline";
+
+function stackSourceBanner(source?: ProfileStackSource): string {
+  if (source === "proc") {
+    return "Live PSI and memory from the agent. CPU kernel stacks sampled from /proc/PID/stack on the top process.";
+  }
+  if (source === "ebpf") {
+    return "Live PSI and memory from the agent. CPU stacks from eBPF perf sampling.";
+  }
+  return "Live PSI and memory from the agent. CPU stacks and kernel functions are inferred until eBPF sampling lands.";
+}
+
+function cpuStackLabel(source?: ProfileStackSource): string {
+  if (source === "proc") {
+    return "CPU hot path (/proc stack)";
+  }
+  if (source === "ebpf") {
+    return "CPU hot path (eBPF)";
+  }
+  return "CPU hot path (inferred)";
+}
 
 function healthLabel(health: NodeHealth): string {
   if (health === "ok") {
@@ -63,18 +84,18 @@ function Sparkline({ values, tone }: { values: number[]; tone?: string }) {
 
 function FlameStack({ frames, label }: { frames: ProfileStackFrame[]; label: string }) {
   const rowHeight = 22;
-  const width = 520;
-  const sorted = [...frames].sort((a, b) => a.depth - b.depth);
-  const height = Math.max(sorted.length, 1) * rowHeight + 8;
+  const width = 360;
+  const depthRows = Math.max(...frames.map((frame) => frame.depth), 0) + 1;
+  const height = depthRows * rowHeight + 8;
 
   return (
     <div className="profile-flamegraph-wrap">
       <span className="profile-panel-label">{label}</span>
       <svg className="profile-flamegraph" viewBox={`0 0 ${width} ${height}`} aria-hidden>
-        {sorted.map((frame) => {
+        {frames.map((frame) => {
           const y = 4 + frame.depth * rowHeight;
-          const blockWidth = Math.max(120, frame.width * (width - 16));
-          const x = 8;
+          const blockWidth = Math.max(24, frame.width * width);
+          const x = frame.offset * (width - blockWidth);
           return (
             <g key={`${frame.label}-${frame.depth}-${frame.offset}`}>
               <rect
@@ -86,7 +107,7 @@ function FlameStack({ frames, label }: { frames: ProfileStackFrame[]; label: str
                 fill={flameColor(frame.heat, 0.92)}
               />
               <text x={x + 8} y={y + 12} className="profile-flame-label">
-                {frame.label.length > 48 ? `${frame.label.slice(0, 46)}…` : frame.label}
+                {frame.label.length > 28 ? `${frame.label.slice(0, 26)}…` : frame.label}
               </text>
             </g>
           );
@@ -416,7 +437,7 @@ export function ProfilingDashboard({
                 </div>
 
                 <div className="profile-inferred-banner">
-                  Live PSI and memory from the agent. CPU stacks and kernel functions are inferred until eBPF sampling lands.
+                  {stackSourceBanner(detail.stackSource)}
                 </div>
 
                 <div className="profile-tabs" role="tablist">
@@ -439,7 +460,7 @@ export function ProfilingDashboard({
                     <InsightCards detail={detail} onSelect={setInvestigationTarget} />
                     <HotPathStack
                       frames={detail.cpuStack}
-                      label="CPU hot path (inferred)"
+                      label={cpuStackLabel(detail.stackSource)}
                       onSelect={setInvestigationTarget}
                       selectedLabel={selectedStackLabel}
                     />

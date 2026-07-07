@@ -7,11 +7,50 @@ import (
 	"time"
 )
 
-func buildCPUStack(processes []ProcessSample, network NetworkProfile) []StackFrame {
+func buildCPUStack(processes []ProcessSample, network NetworkProfile) ([]StackFrame, string) {
 	if len(processes) == 0 {
-		return network.Stack
+		return network.Stack, "inferred"
 	}
 
+	top := processes[0]
+	if kernelFrames := readProcessKernelStack(top.PID, 10); len(kernelFrames) > 0 {
+		return buildCPUStackFromKernel(top, kernelFrames), "proc"
+	}
+
+	return buildInferredCPUStack(processes, network), "inferred"
+}
+
+func buildCPUStackFromKernel(top ProcessSample, kernelFrames []string) []StackFrame {
+	frames := []StackFrame{
+		{Label: "node", Depth: 0, Width: 1, Offset: 0, Heat: 0.12},
+	}
+
+	podLabel := top.Pod
+	if podLabel == "" {
+		podLabel = top.Name
+	} else if top.Namespace != "" {
+		podLabel = top.Namespace + "/" + top.Pod
+	}
+
+	frames = append(frames,
+		StackFrame{Label: podLabel, Depth: 1, Width: 0.85, Offset: 0.02, Heat: 0.35},
+		StackFrame{Label: top.Name + " pid " + strconvItoa(top.PID), Depth: 2, Width: 0.75, Offset: 0.04, Heat: 0.55},
+	)
+
+	for index, label := range kernelFrames {
+		width := max(0.25, 0.7-float64(index)*0.05)
+		frames = append(frames, StackFrame{
+			Label:  label,
+			Depth:  3 + index,
+			Width:  width,
+			Offset: 0.02,
+			Heat:   min(1, 0.5+float64(index)*0.05),
+		})
+	}
+	return frames
+}
+
+func buildInferredCPUStack(processes []ProcessSample, network NetworkProfile) []StackFrame {
 	top := processes[0]
 	kernelPath := inferKernelPath(top.Name, network)
 	frames := []StackFrame{
@@ -64,7 +103,26 @@ func inferKernelPath(processName string, network NetworkProfile) string {
 	return "entry_SYSCALL_64 → schedule → run_queue"
 }
 
-func buildKernelHotspots(processes []ProcessSample, network NetworkProfile) []KernelHotspot {
+func buildKernelHotspots(processes []ProcessSample, network NetworkProfile, kernelFrames []string, stackSource string) []KernelHotspot {
+	if stackSource == "proc" && len(kernelFrames) > 0 {
+		share := 1.0 / float64(len(kernelFrames))
+		hotspots := make([]KernelHotspot, 0, len(kernelFrames))
+		for _, label := range kernelFrames {
+			hotspots = append(hotspots, KernelHotspot{
+				Function: label,
+				Share:    share,
+				Meaning:  "Kernel stack frame from /proc/PID/stack",
+			})
+		}
+		sort.Slice(hotspots, func(i, j int) bool {
+			return hotspots[i].Share > hotspots[j].Share
+		})
+		if len(hotspots) > 5 {
+			hotspots = hotspots[:5]
+		}
+		return hotspots
+	}
+
 	hotspots := []KernelHotspot{}
 	path := inferKernelPath("", network)
 	for index, part := range strings.Split(path, " → ") {
