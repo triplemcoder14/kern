@@ -21,6 +21,5 @@
       "@aws-sdk/client-s3": ["api/node_modules/@aws-sdk/client-s3"]
     }
   },
-  "include": ["src/**/*.ts", "../src/core/**/*.ts", "../src/worker/**/*.ts", "../storage/**/*.ts"],
-  "exclude": ["../src/worker/persistence/idb-persistence.ts", "../src/worker/persistence/indexeddb.ts"]
+  "include": ["src/**/*.ts", "../src/core/**/*.ts", "../src/worker/**/*.ts", "../storage/**/*.ts"]
 }

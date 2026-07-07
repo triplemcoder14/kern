@@ -1,58 +1,141 @@
 #!/usr/bin/env bash
-# Build the KERN web app and rsync static assets to the VPS.
+# Build and deploy the KERN landing page to trykern.xyz on the VPS.
+#
+# Uses fundtrail-nginx (ports 80/443) + kern-web container on fundtrail_default.
 #
 # Usage:
-#   export KERN_DEPLOY_HOST=you@your.vps.ip   # or you@kern.muutassim.xyz
-#   npm run deploy:landing
-#
-# Env:
-#   KERN_DEPLOY_HOST   SSH target (required)
-#   KERN_DEPLOY_USER   SSH user if HOST has no user@ prefix (default: root)
-#   KERN_DEPLOY_PATH   Remote web root (default: /var/www/kern)
-#   KERN_SKIP_BUILD=1  Skip npm run build:web
+#   ./scripts/deploy-landing.sh
 #
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-REMOTE_PATH="${KERN_DEPLOY_PATH:-/var/www/kern}"
+HOST="${KERN_DEPLOY_HOST:-root@167.86.84.96}"
+KEY="${KERN_DEPLOY_KEY:-$HOME/.ssh/id_ed25519}"
+DOMAIN="${KERN_DEPLOY_DOMAIN:-trykern.xyz}"
+WEB_ROOT="${KERN_WEB_ROOT:-/var/www/trykern}"
+NGINX_CONF="${KERN_FUNDTRAIL_NGINX:-/root/fundtrail-app/fundtrail/nginx/nginx-active.conf}"
+NGINX_CONTAINER="${KERN_NGINX_CONTAINER:-fundtrail-nginx-1}"
+WEB_CONTAINER="${KERN_WEB_CONTAINER:-kern-web}"
+MARKER="server_name trykern.xyz"
+HTTPS_MARKER="ssl_certificate /etc/letsencrypt/live/trykern.xyz/fullchain.pem"
 
-resolve_host() {
-  local raw="${KERN_DEPLOY_HOST:-}"
-  if [[ -z "${raw}" ]]; then
-    echo "Set KERN_DEPLOY_HOST, e.g. export KERN_DEPLOY_HOST=you@kern.muutassim.xyz" >&2
-    exit 1
-  fi
-  if [[ "${raw}" == *@* ]]; then
-    echo "${raw}"
-    return
-  fi
-  local user="${KERN_DEPLOY_USER:-root}"
-  echo "${user}@${raw}"
+SSH_OPTS=(-o StrictHostKeyChecking=accept-new)
+if [[ -f "${KEY/#\~/$HOME}" ]]; then
+  SSH_OPTS+=(-i "${KEY/#\~/$HOME}")
+fi
+
+ssh_cmd() {
+  ssh "${SSH_OPTS[@]}" "$HOST" "$@"
 }
 
-SSH_TARGET="$(resolve_host)"
+rsync_cmd() {
+  rsync -avz --delete \
+    -e "ssh ${SSH_OPTS[*]}" \
+    "$@"
+}
 
-cd "${ROOT}"
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [--skip-build] [--skip-cert]
 
-if [[ "${KERN_SKIP_BUILD:-0}" != "1" ]]; then
-  echo "==> Building web app (production)"
+Build dist/, sync to ${WEB_CONTAINER}, configure ${DOMAIN} on fundtrail nginx.
+
+Environment:
+  KERN_DEPLOY_HOST      SSH target (default: root@167.86.84.96)
+  KERN_DEPLOY_KEY       SSH key (default: ~/.ssh/id_ed25519)
+  KERN_DEPLOY_DOMAIN    Domain (default: trykern.xyz)
+EOF
+}
+
+SKIP_BUILD=0
+SKIP_CERT=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --skip-build) SKIP_BUILD=1 ;;
+    --skip-cert) SKIP_CERT=1 ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+if [[ "${SKIP_BUILD}" -eq 0 ]]; then
+  echo "==> Building landing site"
+  cd "${ROOT}"
   npm run build:web
 fi
 
-if [[ ! -d dist ]]; then
-  echo "dist/ missing — run npm run build:web first" >&2
+if [[ ! -d "${ROOT}/dist" ]]; then
+  echo "dist/ not found — run npm run build:web first" >&2
   exit 1
 fi
 
-echo "==> Uploading dist/ -> ${SSH_TARGET}:${REMOTE_PATH}/"
-rsync -avz --delete \
-  --rsync-path="mkdir -p ${REMOTE_PATH} && rsync" \
-  dist/ "${SSH_TARGET}:${REMOTE_PATH}/"
+echo "==> Uploading backup copy to ${HOST}:${WEB_ROOT}/"
+ssh_cmd "mkdir -p '${WEB_ROOT}'"
+rsync_cmd "${ROOT}/dist/" "${HOST}:${WEB_ROOT}/"
 
-echo "==> Reloading nginx on remote (reload only — uses your existing nginx)"
-ssh "${SSH_TARGET}" "command -v nginx >/dev/null && (sudo nginx -t && sudo systemctl reload nginx) || echo 'Skipped nginx reload (not installed or no sudo)'"
+echo "==> Updating ${WEB_CONTAINER} container"
+ssh_cmd "docker cp '${WEB_ROOT}/.' '${WEB_CONTAINER}:/usr/share/nginx/html/'"
+
+echo "==> Ensuring nginx HTTP vhost for ${DOMAIN}"
+ssh_cmd "grep -qF '${MARKER}' '${NGINX_CONF}'" 2>/dev/null || {
+  rsync_cmd "${ROOT}/deploy/nginx/trykern-fundtrail-http.conf" "${HOST}:/tmp/trykern-http.conf"
+  ssh_cmd "cat /tmp/trykern-http.conf >> '${NGINX_CONF}' && rm /tmp/trykern-http.conf"
+  echo "    Appended HTTP vhost"
+}
+
+CERT_DIR="/root/fundtrail-app/fundtrail/certbot/conf/live/${DOMAIN}"
+
+if [[ "${SKIP_CERT}" -eq 0 ]]; then
+  echo "==> TLS certificate for ${DOMAIN}"
+  ssh_cmd "
+    if [[ ! -d '${CERT_DIR}' ]]; then
+      docker run --rm \
+        -v /root/fundtrail-app/fundtrail/certbot/conf:/etc/letsencrypt \
+        -v /root/fundtrail-app/fundtrail/certbot/www:/var/www/certbot \
+        certbot/certbot certonly --webroot \
+        -w /var/www/certbot \
+        -d ${DOMAIN} -d www.${DOMAIN} \
+        --email admin@${DOMAIN} \
+        --agree-tos --non-interactive \
+      || echo 'Certbot failed — point DNS A record to this server, then re-run'
+    else
+      echo 'Certificate already exists'
+    fi
+  "
+fi
+
+echo "==> Ensuring nginx HTTPS vhost for ${DOMAIN}"
+ssh_cmd "
+  if [[ -d '${CERT_DIR}' ]] && ! grep -qF '${HTTPS_MARKER}' '${NGINX_CONF}'; then
+    test -f /tmp/trykern-https.conf || echo 'waiting for upload'
+  fi
+"
+rsync_cmd "${ROOT}/deploy/nginx/trykern-fundtrail-https.conf" "${HOST}:/tmp/trykern-https.conf"
+ssh_cmd "
+  if [[ -d '${CERT_DIR}' ]] && ! grep -qF '${HTTPS_MARKER}' '${NGINX_CONF}'; then
+    cat /tmp/trykern-https.conf >> '${NGINX_CONF}' && rm /tmp/trykern-https.conf
+    echo '    Appended HTTPS vhost'
+  else
+    rm -f /tmp/trykern-https.conf
+  fi
+"
+
+echo "==> Reloading nginx"
+if ssh_cmd "docker exec '${NGINX_CONTAINER}' nginx -t" 2>/dev/null; then
+  ssh_cmd "docker exec '${NGINX_CONTAINER}' nginx -s reload"
+else
+  echo "nginx -t failed — likely waiting for TLS cert. Site may work on HTTP once DNS propagates."
+  echo "Re-run this script after: dig +short ${DOMAIN} A"
+fi
 
 echo ""
-echo "Static files uploaded to ${REMOTE_PATH} on ${SSH_TARGET}."
-echo "Ensure your existing nginx vhost for kern.muutassim.xyz serves that path"
-echo "(see deploy/nginx/kern-locations.conf — include in your server block)."
+echo "Deployed landing to ${WEB_CONTAINER}."
+echo "  https://${DOMAIN}/"

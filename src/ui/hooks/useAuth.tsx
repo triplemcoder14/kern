@@ -8,8 +8,8 @@ import {
   type ReactNode,
 } from "react";
 import {
-  authUrl,
   fetchAuthSession,
+  login as loginRequest,
   logout as logoutRequest,
   type AuthUser,
 } from "../../lib/auth-api";
@@ -18,9 +18,8 @@ interface AuthContextValue {
   user: AuthUser | null;
   loading: boolean;
   refresh: () => Promise<void>;
+  login: (username: string, password: string) => Promise<boolean>;
   logout: () => Promise<void>;
-  signUpWithGitHub: () => void;
-  signInWithGoogle: () => void;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -39,17 +38,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     void refresh();
   }, [refresh]);
 
+  const login = useCallback(async (username: string, password: string) => {
+    const session = await loginRequest(username, password);
+    if (session.authenticated && session.user) {
+      setUser(session.user);
+      setLoading(false);
+      return true;
+    }
+    return false;
+  }, []);
+
   const logout = useCallback(async () => {
     await logoutRequest();
     setUser(null);
-  }, []);
-
-  const signUpWithGitHub = useCallback(() => {
-    window.location.href = authUrl("github", "signup");
-  }, []);
-
-  const signInWithGoogle = useCallback(() => {
-    window.location.href = authUrl("google", "signin");
   }, []);
 
   const value = useMemo(
@@ -57,11 +58,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       user,
       loading,
       refresh,
+      login,
       logout,
-      signUpWithGitHub,
-      signInWithGoogle,
     }),
-    [user, loading, refresh, logout, signUpWithGitHub, signInWithGoogle],
+    [user, loading, refresh, login, logout],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

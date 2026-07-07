@@ -1,6 +1,4 @@
-import { useEffect, useMemo } from "react";
-import { Link, Navigate, useSearchParams } from "react-router-dom";
-import { authErrorMessage } from "../../lib/auth-api";
+import { Link } from "react-router-dom";
 import {
   ConnectClusterFlow,
   FeaturesSection,
@@ -12,9 +10,9 @@ import {
 } from "../components/landing/LandingGraphics";
 import { LandingNavMenu, LandingNavMenuGroup } from "../components/landing/LandingNavMenu";
 import { KernWordmark } from "../components/KernWordmark";
-import { useAuth } from "../hooks/useAuth";
 
 const GITHUB_REPO = "https://github.com/triplemcoder14/kern";
+const INSTALL_DOCS = `${GITHUB_REPO}#quick-start`;
 const DISCORD_URL = "https://discord.gg/kern";
 
 function GitHubIcon() {
@@ -113,10 +111,10 @@ const FEATURES: readonly LandingFeature[] = [
 ] as const;
 
 const PRODUCT_LINKS = [
-  { label: "Console", href: "/app" },
+  { label: "Install", href: INSTALL_DOCS },
   { label: "API", href: `${GITHUB_REPO}/tree/main/api` },
   { label: "Agent", href: `${GITHUB_REPO}/tree/main/agent` },
-  { label: "Collector", href: `${GITHUB_REPO}/tree/main/collector` },
+  { label: "Helm chart", href: `${GITHUB_REPO}/tree/main/deploy/helm/kern` },
 ] as const;
 
 const PRODUCT_NAV = PRODUCT_LINKS;
@@ -131,28 +129,6 @@ const FEATURE_NAV = [
 ] as const;
 
 export function LandingPage() {
-  const { user, loading, signUpWithGitHub, signInWithGoogle } = useAuth();
-  const [searchParams, setSearchParams] = useSearchParams();
-
-  const authError = useMemo(
-    () => authErrorMessage(searchParams.get("auth_error")),
-    [searchParams],
-  );
-
-  useEffect(() => {
-    if (!authError) {
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      setSearchParams({}, { replace: true });
-    }, 8000);
-    return () => window.clearTimeout(timer);
-  }, [authError, setSearchParams]);
-
-  if (!loading && user) {
-    return <Navigate to="/app" replace />;
-  }
-
   return (
     <div className="landing">
       <header className="landing-nav">
@@ -188,9 +164,9 @@ export function LandingPage() {
                 />
               </svg>
             </a>
-            <button type="button" className="landing-nav-cta" onClick={signUpWithGitHub}>
-              Get started
-            </button>
+            <a href={INSTALL_DOCS} target="_blank" rel="noreferrer" className="landing-nav-cta">
+              Install
+            </a>
           </div>
         </div>
       </header>
@@ -201,19 +177,23 @@ export function LandingPage() {
             <div className="landing-hero-copy">
               <h1 className="landing-headline">See every connection inside Kubernetes.</h1>
               <p className="landing-lede">
-                eBPF telemetry from the kernel — no instrumentation, no sidecar per pod.
+                Self-hosted eBPF observability for Kubernetes — deploy on your laptop, VM, or
+                cluster, then sign in to your local console.
               </p>
 
-              {authError ? <div className="landing-alert">{authError}</div> : null}
-
               <div className="landing-hero-actions">
-                <button type="button" className="landing-btn landing-btn-primary" onClick={signUpWithGitHub}>
-                  Connect cluster
+                <a href={INSTALL_DOCS} target="_blank" rel="noreferrer" className="landing-btn landing-btn-primary">
+                  Install KERN
                   <ArrowIcon />
-                </button>
-                <button type="button" className="landing-btn landing-btn-secondary" onClick={signInWithGoogle}>
-                  Sign in with Google
-                </button>
+                </a>
+                <a
+                  href={`${GITHUB_REPO}#readme`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="landing-btn landing-btn-secondary"
+                >
+                  Read docs
+                </a>
               </div>
             </div>
             <HeroIsometric />
@@ -286,21 +266,22 @@ export function LandingPage() {
           </div>
         </section>
 
-        <section className="landing-cta">
+        <section id="install" className="landing-cta">
           <div className="landing-wrap landing-cta-grid">
             <div className="landing-cta-copy">
-              <h2>Ready to connect?</h2>
+              <h2>Deploy on your infrastructure</h2>
               <p>
-                Deploy the agent once, sign in, and watch pod-to-pod traffic from syscalls and
-                network events — correlated with your cluster topology.
+                Run KERN like Grafana or Elastic — on a laptop, VM, or Kubernetes cluster. One
+                install command brings up the console and agent; sign in with the admin password you
+                set during setup.
               </p>
               <div className="landing-cta-actions">
-                <button type="button" className="landing-btn landing-btn-primary" onClick={signUpWithGitHub}>
-                  Connect cluster
+                <a href={INSTALL_DOCS} target="_blank" rel="noreferrer" className="landing-btn landing-btn-primary">
+                  Install KERN
                   <ArrowIcon />
-                </button>
+                </a>
                 <a
-                  href="https://github.com/triplemcoder14/kern#readme"
+                  href={`${GITHUB_REPO}#readme`}
                   target="_blank"
                   rel="noreferrer"
                   className="landing-btn landing-btn-secondary"

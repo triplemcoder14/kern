@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { renderCloudPage } from "@kern/platform";
 import { configToConnectInput, saveClusterConfig, type ClusterConfig } from "../../core/config/cluster-config";
 import { isAlertSoundMuted, setAlertSoundMuted, unlockAlertSound } from "../lib/alert-sound";
 import { AppShell, type NavId, type NavPage } from "../components/AppShell";
@@ -40,6 +41,10 @@ export function ConsoleApp() {
   };
 
   const clusterName = monitor.connection?.clusterName ?? "disconnected";
+  const cloudPage = renderCloudPage(page, {
+    user,
+    onNavigate: (nextPage) => handleNavigate(nextPage, nextPage),
+  });
 
   const handleNavigate = (nav: NavId, nextPage: NavPage) => {
     setActiveNav(nav);
@@ -152,6 +157,8 @@ export function ConsoleApp() {
           onDisconnect={monitor.disconnect}
         />
       )}
+
+      {cloudPage}
     </AppShell>
   );
 }
