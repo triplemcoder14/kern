@@ -1,0 +1,43 @@
+# Self-hosted KERN console (UI + API) for Linux or macOS with Docker.
+#
+# Quick install:
+#   ../../scripts/install-console-docker.sh
+#
+# Manual:
+#   cp .env.example .env
+#   docker compose -f docker-compose.self-hosted.yml up -d
+#
+# Open http://localhost:8080/login
+
+services:
+  kern-api:
+    image: ghcr.io/triplemcoder14/kern-api:${KERN_VERSION:-0.6.0}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.api-self-hosted
+    env_file: .env
+    environment:
+      KERN_API_PORT: "3000"
+      KERN_DATA_DIR: /var/lib/kern/data
+      KERN_PUBLIC_ORIGIN: ${KERN_PUBLIC_ORIGIN:-http://localhost:8080}
+      KERN_K8S_PROXY: ${KERN_K8S_PROXY:-http://host.docker.internal:8001}
+      KERN_EBPF_COLLECTOR: ${KERN_EBPF_COLLECTOR:-http://host.docker.internal:9474}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - kern-data:/var/lib/kern/data
+    restart: unless-stopped
+
+  kern-web:
+    image: ghcr.io/triplemcoder14/kern-web:${KERN_VERSION:-0.6.0}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.web-self-hosted
+    ports:
+      - "${KERN_CONSOLE_PORT:-8080}:80"
+    depends_on:
+      - kern-api
+    restart: unless-stopped
+
+volumes:
+  kern-data:
