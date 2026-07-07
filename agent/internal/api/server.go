@@ -21,12 +21,24 @@ type Server struct {
 	profile   profile.Collector
 }
 
+type profilePodLookup struct {
+	resolver *k8s.Resolver
+}
+
+func (p profilePodLookup) LookupPodByUID(uid string) (namespace, name string, ok bool) {
+	ref, ok := p.resolver.LookupPodByUID(uid)
+	if !ok {
+		return "", "", false
+	}
+	return ref.Namespace, ref.Name, true
+}
+
 func NewServer(flows *store.FlowStore, tracer trace.Tracer, resolver *k8s.Resolver) *Server {
 	return &Server{
 		flows:    flows,
 		tracer:   tracer,
 		resolver: resolver,
-		profile:  profile.NewCollector(),
+		profile:  profile.NewCollector(profilePodLookup{resolver: resolver}),
 	}
 }
 
