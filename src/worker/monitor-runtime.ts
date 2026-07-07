@@ -630,7 +630,7 @@ export class MonitorRuntime {
     return {
       health,
       connected: this.connected,
-      clusterName: this.config?.name ?? "disconnected",
+      clusterName: this.connected ? (this.config?.name?.trim() || "minikube") : "Not connected",
       podCount: podNodes.length,
       runningPods: podNodes.filter((node) => node.status === "healthy").length,
       failedPods: podNodes.filter((node) => node.status === "degraded").length,
