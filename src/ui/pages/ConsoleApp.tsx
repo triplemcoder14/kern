@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { renderCloudPage } from "@kern/platform";
-import { configToConnectInput, saveClusterConfig, type ClusterConfig } from "../../core/config/cluster-config";
+import { configToConnectInput, loadClusterConfig, saveClusterConfig, type ClusterConfig } from "../../core/config/cluster-config";
 import { isAlertSoundMuted, setAlertSoundMuted, unlockAlertSound } from "../lib/alert-sound";
 import { AppShell, type NavId, type NavPage } from "../components/AppShell";
 import { AlertsDashboard } from "../components/AlertsDashboard";
@@ -40,7 +40,10 @@ export function ConsoleApp() {
     await monitor.connect(configToConnectInput(config));
   };
 
-  const clusterName = monitor.connection?.clusterName ?? "disconnected";
+  const savedClusterName = loadClusterConfig().clusterName.trim() || "minikube";
+  const clusterName = monitor.connection?.clusterName?.trim()
+    || (monitor.health.connected ? monitor.health.clusterName : savedClusterName)
+    || savedClusterName;
   const cloudPage = renderCloudPage(page, {
     user,
     onNavigate: (nextPage) => handleNavigate(nextPage, nextPage),
