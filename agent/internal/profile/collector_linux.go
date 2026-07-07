@@ -16,12 +16,13 @@ import (
 type platformCollector struct {
 	prevIdle        uint64
 	prevTotal       uint64
-	prevProcTicks  map[int]uint64
-	prevProcSample time.Time
+	prevProcTicks   map[int]uint64
+	prevProcSample  time.Time
+	podLookup       PodLookup
 }
 
-func newPlatformCollector() Collector {
-	return &platformCollector{}
+func newPlatformCollector(lookup PodLookup) Collector {
+	return &platformCollector{podLookup: lookup}
 }
 
 func (c *platformCollector) Snapshot(flows *store.FlowStore) Snapshot {
