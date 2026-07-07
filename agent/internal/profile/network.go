@@ -183,13 +183,30 @@ func buildLog(snapshot []store.Flow) []LogLine {
 }
 
 func deriveHealth(network NetworkProfile, cpuPercent float64, load1 float64, cores int) string {
+	return deriveHealthWithPSI(network, cpuPercent, load1, cores, PSISnapshot{}, MemoryDetail{})
+}
+
+func deriveHealthWithPSI(
+	network NetworkProfile,
+	cpuPercent float64,
+	load1 float64,
+	cores int,
+	psi PSISnapshot,
+	memDetail MemoryDetail,
+) string {
 	if network.Drops > 0 || network.P95Ms >= 150 {
+		return "warn"
+	}
+	if psi.CPULevel == PSICritical || psi.MemoryLevel == PSICritical {
 		return "warn"
 	}
 	if cpuPercent >= 85 || (cores > 0 && load1/float64(cores) >= 0.9) {
 		return "warn"
 	}
-	if network.P95Ms == 0 && network.FlowsPerSecond == 0 {
+	if memDetail.ReclaimActivity == "High" || psi.CPULevel == PSIWarn || psi.MemoryLevel == PSIWarn {
+		return "warn"
+	}
+	if network.P95Ms == 0 && network.FlowsPerSecond == 0 && cpuPercent == 0 {
 		return "unknown"
 	}
 	return "ok"
