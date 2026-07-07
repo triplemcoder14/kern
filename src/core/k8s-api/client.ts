@@ -106,6 +106,7 @@ interface K8sNodeObject {
   status?: {
     conditions?: Array<{ type?: string; status?: string }>;
     capacity?: Record<string, string>;
+    addresses?: Array<{ type?: string; address?: string }>;
   };
 }
 
@@ -113,7 +114,14 @@ export interface K8sNodeSummary {
   name: string;
   zone?: string;
   cpuCores?: number;
+  memoryTotalMb?: number;
+  internalIPs: string[];
   ready: boolean;
+}
+
+export interface K8sNodeResourceMetrics {
+  cpuUsageNano?: number;
+  memoryUsedKi?: number;
 }
 
 export class K8sApiClient {
@@ -267,13 +275,38 @@ export class K8sApiClient {
         node.metadata.labels?.["topology.kubernetes.io/zone"] ??
         node.metadata.labels?.["failure-domain.beta.kubernetes.io/zone"];
       const cpu = node.status?.capacity?.cpu;
+      const memoryKi = node.status?.capacity?.memory;
+      const internalIPs = (node.status?.addresses ?? [])
+        .filter((entry) => entry.type === "InternalIP" && entry.address)
+        .map((entry) => entry.address as string);
       return {
         name: node.metadata.name,
         zone,
         cpuCores: cpu ? Number.parseInt(cpu, 10) : undefined,
+        memoryTotalMb: memoryKi ? parseCapacityMemoryMi(memoryKi) : undefined,
+        internalIPs,
         ready,
       };
     });
+  }
+
+  async listNodeMetrics(): Promise<Map<string, K8sNodeResourceMetrics>> {
+    const response = await this.fetchWithTimeout("/apis/metrics.k8s.io/v1beta1/nodes");
+    if (!response.ok) {
+      return new Map();
+    }
+    const body = (await response.json()) as K8sList<{
+      metadata: { name: string };
+      usage?: { cpu?: string; memory?: string };
+    }>;
+    const map = new Map<string, K8sNodeResourceMetrics>();
+    for (const item of body.items ?? []) {
+      map.set(item.metadata.name, {
+        cpuUsageNano: parseNanoCpu(item.usage?.cpu),
+        memoryUsedKi: parseKiQuantity(item.usage?.memory),
+      });
+    }
+    return map;
   }
 
   async listPodsOnNodes(): Promise<Array<{ namespace: string; name: string; nodeName: string }>> {
@@ -348,3 +381,32 @@ export class K8sApiClient {
 }
 
 export type { K8sEndpointsObject, K8sEventObject, K8sPodObject, K8sServiceObject };
+
+function parseCapacityMemoryMi(value: string): number {
+  if (value.endsWith("Ki")) {
+    return Math.round(Number.parseInt(value, 10) / 1024);
+  }
+  if (value.endsWith("Mi")) {
+    return Number.parseInt(value, 10);
+  }
+  if (value.endsWith("Gi")) {
+    return Number.parseInt(value, 10) * 1024;
+  }
+  return 0;
+}
+
+function parseKiQuantity(value?: string): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const numeric = Number.parseInt(value, 10);
+  return Number.isFinite(numeric) ? numeric : undefined;
+}
+
+function parseNanoCpu(value?: string): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const numeric = Number.parseInt(value.replace(/n$/, ""), 10);
+  return Number.isFinite(numeric) ? numeric : undefined;
+}
