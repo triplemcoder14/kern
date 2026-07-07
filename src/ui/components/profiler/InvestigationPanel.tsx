@@ -1,4 +1,24 @@
-import type { NodeProfileDetail, PodConsumer, ProcessSample } from "../../../core/types/profiling";
+import type { NodeProfileDetail, PodConsumer, ProcessSample, ProfileStackSource } from "../../../core/types/profiling";
+
+function stackSourceNote(source?: ProfileStackSource): string {
+  if (source === "proc") {
+    return "Kernel stacks are sampled from /proc/PID/stack on the top CPU process.";
+  }
+  if (source === "ebpf") {
+    return "Kernel stacks are sampled with eBPF perf events.";
+  }
+  return "CPU stacks and kernel functions are inferred until eBPF perf sampling lands.";
+}
+
+function stackShareLabel(source?: ProfileStackSource): string {
+  if (source === "proc") {
+    return "sampled";
+  }
+  if (source === "ebpf") {
+    return "eBPF";
+  }
+  return "inferred";
+}
 
 export type InvestigationTarget =
   | { kind: "kernel"; function: string; share?: number; meaning?: string }
@@ -66,6 +86,11 @@ function causesFor(target: InvestigationTarget, detail: NodeProfileDetail): stri
     }
     return ["Kernel path inferred from live process and network context"];
   }
+  if (target.kind === "stack") {
+    if (detail.stackSource === "proc") {
+      return ["Kernel stack frame from /proc/PID/stack on the top process"];
+    }
+  }
   if (target.kind === "pod" || target.kind === "process") {
     return ["Top consumer on this node in the current sample window"];
   }
@@ -92,7 +117,7 @@ export function InvestigationPanel({ detail, target, onClear }: InvestigationPan
         <div className="panel-header">Investigation</div>
         <div className="profile-investigation-empty">
           <p>Select a kernel function, pod, or stack frame to inspect likely causes and related consumers.</p>
-          <p className="profile-investigation-note">CPU stacks and kernel functions are inferred until eBPF perf sampling lands.</p>
+          <p className="profile-investigation-note">{stackSourceNote(detail.stackSource)}</p>
         </div>
       </aside>
     );
@@ -117,7 +142,9 @@ export function InvestigationPanel({ detail, target, onClear }: InvestigationPan
           <span className="profile-investigation-kicker">Selected</span>
           <strong>{titleFor(target)}</strong>
           {target.kind === "kernel" && target.share !== undefined ? (
-            <span className="profile-investigation-meta">CPU share ~{(target.share * 100).toFixed(1)}% (inferred)</span>
+            <span className="profile-investigation-meta">
+              CPU share ~{(target.share * 100).toFixed(1)}% ({stackShareLabel(detail.stackSource)})
+            </span>
           ) : null}
         </div>
 
