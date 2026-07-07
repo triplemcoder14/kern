@@ -3,6 +3,7 @@ import { ProtectedRoute } from "./ui/components/ProtectedRoute";
 import { AuthProvider } from "./ui/hooks/useAuth";
 import { ConsoleApp } from "./ui/pages/ConsoleApp";
 import { LandingPage } from "./ui/pages/LandingPage";
+import { LoginPage } from "./ui/pages/LoginPage";
 
 function App() {
   return (
@@ -10,6 +11,7 @@ function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/" element={<LandingPage />} />
+          <Route path="/login" element={<LoginPage />} />
           <Route
             path="/app"
             element={

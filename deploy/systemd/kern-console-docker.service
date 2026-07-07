@@ -1,0 +1,18 @@
+[Unit]
+Description=KERN Console (Docker Compose)
+Documentation=https://github.com/triplemcoder14/kern/blob/main/docs/INSTALL.md
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/kern/docker
+EnvironmentFile=/etc/kern/console.env
+ExecStart=/usr/bin/docker compose -f docker-compose.self-hosted.yml up -d --remove-orphans
+ExecStop=/usr/bin/docker compose -f docker-compose.self-hosted.yml down
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target
