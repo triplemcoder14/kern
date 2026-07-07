@@ -19,10 +19,14 @@ type platformCollector struct {
 	prevProcTicks   map[int]uint64
 	prevProcSample  time.Time
 	podLookup       PodLookup
+	stackSampler    StackSampler
 }
 
 func newPlatformCollector(lookup PodLookup) Collector {
-	return &platformCollector{podLookup: lookup}
+	return &platformCollector{
+		podLookup:    lookup,
+		stackSampler: NewStackSampler(),
+	}
 }
 
 func (c *platformCollector) Snapshot(flows *store.FlowStore) Snapshot {
@@ -42,7 +46,11 @@ func (c *platformCollector) Snapshot(flows *store.FlowStore) Snapshot {
 	processes := c.collectProcessSamples(15)
 	topPods := aggregateTopPods(processes, 8)
 	kernelMem := readKernelMemory(memDetail, memUsed, memTotal)
-	cpuStack, stackSource := buildCPUStack(processes, network)
+	var ebpfFrames []string
+	if len(processes) > 0 && c.stackSampler != nil && c.stackSampler.Available() {
+		ebpfFrames = c.stackSampler.SampleTopProcess(processes[0].PID)
+	}
+	cpuStack, stackSource := buildCPUStack(processes, network, ebpfFrames)
 	kernelFrames := kernelFrameLabels(cpuStack, stackSource)
 	hotspots := buildKernelHotspots(processes, network, kernelFrames, stackSource)
 	timeline := buildTimeline(psi, memDetail, cpuPercent, processes)
@@ -190,7 +198,7 @@ func envOr(key, fallback string) string {
 }
 
 func kernelFrameLabels(stack []StackFrame, stackSource string) []string {
-	if stackSource != "proc" {
+	if stackSource != "proc" && stackSource != "ebpf" {
 		return nil
 	}
 	labels := make([]string, 0, len(stack))
