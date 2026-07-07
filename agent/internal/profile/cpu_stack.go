@@ -7,7 +7,11 @@ import (
 	"time"
 )
 
-func buildCPUStack(processes []ProcessSample, network NetworkProfile) ([]StackFrame, string) {
+func buildCPUStack(processes []ProcessSample, network NetworkProfile, ebpfFrames []string) ([]StackFrame, string) {
+	if len(processes) > 0 && len(ebpfFrames) > 0 {
+		return buildCPUStackFromKernel(processes[0], ebpfFrames), "ebpf"
+	}
+
 	if len(processes) == 0 {
 		return network.Stack, "inferred"
 	}
@@ -103,15 +107,22 @@ func inferKernelPath(processName string, network NetworkProfile) string {
 	return "entry_SYSCALL_64 → schedule → run_queue"
 }
 
+func kernelStackMeaning(stackSource string) string {
+	if stackSource == "ebpf" {
+		return "Kernel stack frame from eBPF stack trace"
+	}
+	return "Kernel stack frame from /proc/PID/stack"
+}
+
 func buildKernelHotspots(processes []ProcessSample, network NetworkProfile, kernelFrames []string, stackSource string) []KernelHotspot {
-	if stackSource == "proc" && len(kernelFrames) > 0 {
+	if (stackSource == "proc" || stackSource == "ebpf") && len(kernelFrames) > 0 {
 		share := 1.0 / float64(len(kernelFrames))
 		hotspots := make([]KernelHotspot, 0, len(kernelFrames))
 		for _, label := range kernelFrames {
 			hotspots = append(hotspots, KernelHotspot{
 				Function: label,
 				Share:    share,
-				Meaning:  "Kernel stack frame from /proc/PID/stack",
+				Meaning:  kernelStackMeaning(stackSource),
 			})
 		}
 		sort.Slice(hotspots, func(i, j int) bool {
