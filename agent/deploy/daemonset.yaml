@@ -55,6 +55,7 @@ spec:
     spec:
       serviceAccountName: kern-agent
       hostNetwork: true
+      hostPID: true
       dnsPolicy: ClusterFirstWithHostNet
       tolerations:
         - operator: Exists
