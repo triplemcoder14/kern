@@ -23,6 +23,8 @@ export function InsightCards({ detail, onSelect }: InsightCardsProps) {
   const hotSyscall = detail.cpuStack
     .filter((frame) => frame.depth >= 3)
     .sort((a, b) => b.heat - a.heat)[0];
+  const inferredStacks = detail.stackSource !== "proc" && detail.stackSource !== "ebpf";
+  const shareSuffix = inferredStacks ? " inferred" : detail.stackSource === "proc" ? " sampled" : " eBPF";
 
   return (
     <div className="profile-insights">
@@ -76,8 +78,8 @@ export function InsightCards({ detail, onSelect }: InsightCardsProps) {
       >
         <span className="profile-insight-label">Hottest kernel function</span>
         <strong>{topHotspot?.function ?? "—"}</strong>
-        <span className="profile-insight-value inferred">
-          {topHotspot ? `${(topHotspot.share * 100).toFixed(0)}% inferred` : "—"}
+        <span className={`profile-insight-value${inferredStacks ? " inferred" : ""}`}>
+          {topHotspot ? `${(topHotspot.share * 100).toFixed(0)}%${shareSuffix}` : "—"}
         </span>
       </button>
 
@@ -92,8 +94,8 @@ export function InsightCards({ detail, onSelect }: InsightCardsProps) {
       >
         <span className="profile-insight-label">Hottest syscall path</span>
         <strong>{hotSyscall?.label ?? "—"}</strong>
-        <span className="profile-insight-value inferred">
-          {hotSyscall ? `${(hotSyscall.heat * 100).toFixed(0)}% inferred` : "—"}
+        <span className={`profile-insight-value${inferredStacks ? " inferred" : ""}`}>
+          {hotSyscall ? `${(hotSyscall.heat * 100).toFixed(0)}%${shareSuffix}` : "—"}
         </span>
       </button>
 

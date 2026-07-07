@@ -63,8 +63,9 @@ func (c *platformCollector) Snapshot(flows *store.FlowStore) Snapshot {
 			{Namespace: "default", Pod: "api-xyz", CPUPercent: 12, RSSMB: 512},
 		},
 		TopProcesses:   processes,
-		KernelHotspots: buildKernelHotspots(processes, network),
-		CPUStack:       buildCPUStack(processes, network),
+		KernelHotspots: buildKernelHotspots(processes, network, nil, "inferred"),
+		CPUStack:       buildInferredCPUStack(processes, network),
+		StackSource:    "inferred",
 		Timeline:       buildTimeline(psi, memDetail, cpuPercent, processes),
 		SampledAt:      time.Now().UTC(),
 	}

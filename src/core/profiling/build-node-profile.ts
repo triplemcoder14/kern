@@ -410,6 +410,7 @@ function buildDetail(
   const cpuStack = agent?.cpu_stack && agent.cpu_stack.length > 0
     ? agent.cpu_stack
     : buildStack(flows, agent?.network?.stack);
+  const stackSource = agent?.stack_source ?? "inferred";
 
   if (psi.cpuLevel !== "normal" || psi.memoryLevel !== "normal") {
     profileMetrics.push(
@@ -485,6 +486,7 @@ function buildDetail(
     metrics: profileMetrics,
     stack: buildStack(flows, agent?.network?.stack),
     cpuStack,
+    stackSource,
     log: buildLog(flows, events, agent?.network?.log),
     psi,
     memoryDetail,

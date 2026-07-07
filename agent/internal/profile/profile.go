@@ -114,6 +114,7 @@ type Snapshot struct {
 	TopProcesses   []ProcessSample  `json:"top_processes"`
 	KernelHotspots []KernelHotspot  `json:"kernel_hotspots"`
 	CPUStack       []StackFrame     `json:"cpu_stack"`
+	StackSource    string           `json:"stack_source,omitempty"`
 	Timeline       []TimelineEvent  `json:"timeline"`
 	SampledAt      time.Time        `json:"sampled_at"`
 }
