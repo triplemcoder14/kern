@@ -63,18 +63,18 @@ function Sparkline({ values, tone }: { values: number[]; tone?: string }) {
 
 function FlameStack({ frames, label }: { frames: ProfileStackFrame[]; label: string }) {
   const rowHeight = 22;
-  const width = 360;
-  const depthRows = Math.max(...frames.map((frame) => frame.depth), 0) + 1;
-  const height = depthRows * rowHeight + 8;
+  const width = 520;
+  const sorted = [...frames].sort((a, b) => a.depth - b.depth);
+  const height = Math.max(sorted.length, 1) * rowHeight + 8;
 
   return (
     <div className="profile-flamegraph-wrap">
       <span className="profile-panel-label">{label}</span>
       <svg className="profile-flamegraph" viewBox={`0 0 ${width} ${height}`} aria-hidden>
-        {frames.map((frame) => {
+        {sorted.map((frame) => {
           const y = 4 + frame.depth * rowHeight;
-          const blockWidth = Math.max(24, frame.width * width);
-          const x = frame.offset * (width - blockWidth);
+          const blockWidth = Math.max(120, frame.width * (width - 16));
+          const x = 8;
           return (
             <g key={`${frame.label}-${frame.depth}-${frame.offset}`}>
               <rect
@@ -86,7 +86,7 @@ function FlameStack({ frames, label }: { frames: ProfileStackFrame[]; label: str
                 fill={flameColor(frame.heat, 0.92)}
               />
               <text x={x + 8} y={y + 12} className="profile-flame-label">
-                {frame.label.length > 28 ? `${frame.label.slice(0, 26)}…` : frame.label}
+                {frame.label.length > 48 ? `${frame.label.slice(0, 46)}…` : frame.label}
               </text>
             </g>
           );
