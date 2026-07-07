@@ -12,7 +12,7 @@ import (
 
 type platformCollector struct{}
 
-func newPlatformCollector() Collector {
+func newPlatformCollector(_ PodLookup) Collector {
 	return &platformCollector{}
 }
 
