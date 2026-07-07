@@ -14,15 +14,19 @@ import (
 )
 
 type platformCollector struct {
-	prevIdle        uint64
-	prevTotal       uint64
-	prevProcTicks   map[int]uint64
-	prevProcSample  time.Time
-	podLookup       PodLookup
+	prevIdle         uint64
+	prevTotal        uint64
+	prevProcTicks    map[int]uint64
+	prevProcSample   time.Time
+	podLookup        PodLookup
+	kernelEvents     *kernelEventTracker
 }
 
 func newPlatformCollector(lookup PodLookup) Collector {
-	return &platformCollector{podLookup: lookup}
+	return &platformCollector{
+		podLookup:    lookup,
+		kernelEvents: newKernelEventTracker(),
+	}
 }
 
 func (c *platformCollector) Snapshot(flows *store.FlowStore) Snapshot {
@@ -45,7 +49,8 @@ func (c *platformCollector) Snapshot(flows *store.FlowStore) Snapshot {
 	cpuStack, stackSource := buildCPUStack(processes, network)
 	kernelFrames := kernelFrameLabels(cpuStack, stackSource)
 	hotspots := buildKernelHotspots(processes, network, kernelFrames, stackSource)
-	timeline := buildTimeline(psi, memDetail, cpuPercent, processes)
+	oomDelta := c.kernelEvents.observeOOMKill()
+	timeline := mergeTimelineEvents(readKernelEvents(oomDelta), buildTimeline(psi, memDetail, cpuPercent, processes))
 
 	return Snapshot{
 		NodeName:       nodeName,
@@ -190,7 +195,7 @@ func envOr(key, fallback string) string {
 }
 
 func kernelFrameLabels(stack []StackFrame, stackSource string) []string {
-	if stackSource != "proc" {
+	if stackSource != "proc" && stackSource != "ebpf" {
 		return nil
 	}
 	labels := make([]string, 0, len(stack))
@@ -200,4 +205,26 @@ func kernelFrameLabels(stack []StackFrame, stackSource string) []string {
 		}
 	}
 	return labels
+}
+
+func mergeTimelineEvents(kernel, base []TimelineEvent) []TimelineEvent {
+	if len(kernel) == 0 {
+		return base
+	}
+	merged := append([]TimelineEvent(nil), kernel...)
+	seen := map[string]struct{}{}
+	for _, event := range kernel {
+		seen[event.Title+"|"+event.Detail] = struct{}{}
+	}
+	for _, event := range base {
+		key := event.Title + "|" + event.Detail
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		merged = append(merged, event)
+	}
+	if len(merged) > 20 {
+		merged = merged[:20]
+	}
+	return merged
 }
