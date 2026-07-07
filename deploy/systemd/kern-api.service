@@ -1,0 +1,19 @@
+[Unit]
+Description=KERN Console API
+Documentation=https://github.com/triplemcoder14/kern/blob/main/docs/INSTALL.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kern
+Group=kern
+EnvironmentFile=/etc/kern/console.env
+WorkingDirectory=/opt/kern/api
+ExecStart=/usr/bin/env node dist/api/src/main.js
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

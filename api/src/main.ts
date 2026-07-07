@@ -13,7 +13,17 @@ async function bootstrap() {
   });
 
   const port = Number(process.env.KERN_API_PORT ?? 3000);
-  await app.listen(port);
+  try {
+    await app.listen(port);
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? error.code : null;
+    if (code === "EADDRINUSE") {
+      console.error(`Port ${port} is already in use. Stop the other process and retry:`);
+      console.error(`  kill $(lsof -t -i:${port})`);
+      process.exit(1);
+    }
+    throw error;
+  }
   console.log(`KERN API listening on http://127.0.0.1:${port}/api`);
 }
 

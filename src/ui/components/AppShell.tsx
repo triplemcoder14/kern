@@ -1,8 +1,9 @@
 import { useState, type ReactElement, type ReactNode, type SVGProps } from "react";
 import type { AuthUser } from "../../lib/auth-api";
+import { getCloudNav, type CloudNavItem } from "@kern/platform";
 import { KernWordmark } from "./KernWordmark";
 
-export type NavPage =
+export type CoreNavPage =
   | "overview"
   | "topology"
   | "flows"
@@ -13,7 +14,8 @@ export type NavPage =
   | "events"
   | "settings";
 
-export type NavId = NavPage;
+export type NavPage = CoreNavPage | string;
+export type NavId = CoreNavPage | string;
 
 interface AppShellProps {
   activeNav: NavId;
@@ -33,6 +35,15 @@ interface NavItem {
   page: NavPage;
   label: string;
   Icon: (props: SVGProps<SVGSVGElement>) => ReactElement;
+}
+
+function cloudNavToItem(item: CloudNavItem): NavItem {
+  return {
+    id: item.id,
+    page: item.page,
+    label: item.label,
+    Icon: item.Icon as NavItem["Icon"],
+  };
 }
 
 function IconOverview(props: SVGProps<SVGSVGElement>) {
@@ -201,24 +212,26 @@ export function AppShell({
 }: AppShellProps) {
   const [collapsed, setCollapsed] = useState(false);
   const userInitial = user?.name.slice(0, 1).toUpperCase() ?? "?";
+  const cloudItems = getCloudNav();
+  const cloudNav = cloudItems.map(cloudNavToItem);
 
   const handleLogout = () => {
     if (!onLogout) {
       return;
     }
     void onLogout().then(() => {
-      window.location.href = "/";
+      window.location.href = "/login";
     });
   };
 
-  const renderNavItem = (item: NavItem) => {
+  const renderNavItem = (item: NavItem, accent?: "promo") => {
     const isActive = activeNav === item.id;
     const showBadge = item.id === "alerts" && alertCount > 0;
     return (
       <button
         key={item.id}
         type="button"
-        className={`shell-nav-item ${isActive ? "active" : ""}`}
+        className={`shell-nav-item${isActive ? " active" : ""}${accent === "promo" ? " shell-nav-item-promo" : ""}`}
         onClick={() => onNavigate(item.id, item.page)}
         title={collapsed ? item.label : undefined}
       >
@@ -249,24 +262,30 @@ export function AppShell({
         </div>
 
         <nav className="shell-nav shell-nav-primary">
-          {PRIMARY_NAV.map(renderNavItem)}
+          {PRIMARY_NAV.map((item) => renderNavItem(item))}
         </nav>
 
-        <nav className="shell-nav shell-nav-secondary">{SECONDARY_NAV.map(renderNavItem)}</nav>
+        {cloudNav.length > 0 ? (
+          <nav className="shell-nav shell-nav-cloud" aria-label="Kern K8s Runner">
+            {!collapsed ? <div className="shell-nav-section">K8s Runner</div> : null}
+            {cloudItems.map((source) => {
+              const item = cloudNav.find((entry) => entry.id === source.id);
+              return item ? renderNavItem(item, source.accent) : null;
+            })}
+          </nav>
+        ) : null}
+
+        <nav className="shell-nav shell-nav-secondary">{SECONDARY_NAV.map((item) => renderNavItem(item))}</nav>
 
         <div className="shell-sidebar-foot">
           <div className="shell-account">
-            {user?.avatarUrl ? (
-              <img src={user.avatarUrl} alt="" className="shell-user-avatar shell-user-avatar-img" />
-            ) : (
-              <div className="shell-user-avatar">{userInitial}</div>
-            )}
+            <div className="shell-user-avatar">{userInitial}</div>
 
             {!collapsed ? (
               <div className="shell-account-meta">
                 <div className="shell-user-name">{user?.name ?? "Signed in"}</div>
                 <div className="shell-account-sub">
-                  <span className="shell-user-role">{user?.provider ?? "Account"}</span>
+                  <span className="shell-user-role">{user?.username ?? "Account"}</span>
                   <span className="shell-account-sep" aria-hidden>
                     ·
                   </span>
