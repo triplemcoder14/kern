@@ -128,6 +128,7 @@ function PodTable({ pods, onSelect }: { pods: PodConsumer[]; onSelect: (target: 
         <span>Pod</span>
         <span>Namespace</span>
         <span>RSS</span>
+        <span>Cache</span>
         <span>CPU</span>
       </div>
       {pods.map((pod) => (
@@ -140,6 +141,7 @@ function PodTable({ pods, onSelect }: { pods: PodConsumer[]; onSelect: (target: 
           <span>{pod.pod}</span>
           <span>{pod.namespace}</span>
           <span>{pod.rssMb !== undefined ? `${pod.rssMb}MB` : "—"}</span>
+          <span>{pod.cacheMb !== undefined ? `${pod.cacheMb}MB` : "—"}</span>
           <span>{pod.cpuPercent !== undefined ? `${pod.cpuPercent.toFixed(1)}%` : "—"}</span>
         </button>
       ))}

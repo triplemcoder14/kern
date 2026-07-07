@@ -23,19 +23,21 @@ func init() {
 }
 
 type procSample struct {
-	pid       int
-	name      string
-	namespace string
-	pod       string
-	cpuTicks  uint64
-	rssKB     uint64
+	pid           int
+	name          string
+	namespace     string
+	pod           string
+	cpuTicks      uint64
+	rssKB         uint64
+	cgroupCacheKB uint64
+	majorFaults   uint64
 }
 
-func (c *platformCollector) collectProcessSamples(limit int) []ProcessSample {
+func (c *platformCollector) collectProcessSamples(limit int) ([]ProcessSample, []procSample) {
 	now := time.Now()
 	current := c.scanProcesses()
 	if len(current) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	if c.prevProcSample.IsZero() {
@@ -92,7 +94,7 @@ func (c *platformCollector) collectProcessSamples(limit int) []ProcessSample {
 			RSSMB:      item.sample.rssKB / 1024,
 		})
 	}
-	return out
+	return out, current
 }
 
 func (c *platformCollector) scanProcesses() []procSample {
@@ -118,13 +120,16 @@ func (c *platformCollector) scanProcesses() []procSample {
 			continue
 		}
 		ns, pod := c.resolvePodFromPID(pid)
+		cacheKB, majorFaults := readProcessCgroupStats(pid)
 		samples = append(samples, procSample{
-			pid:       pid,
-			name:      stat.name,
-			namespace: ns,
-			pod:       pod,
-			cpuTicks:  stat.utime + stat.stime,
-			rssKB:     stat.rss,
+			pid:           pid,
+			name:          stat.name,
+			namespace:     ns,
+			pod:           pod,
+			cpuTicks:      stat.utime + stat.stime,
+			rssKB:         stat.rss,
+			cgroupCacheKB: cacheKB,
+			majorFaults:   majorFaults,
 		})
 	}
 	return samples
@@ -239,12 +244,31 @@ func readKubeletPodMeta(podUID string) (namespace, pod string, ok bool) {
 	return strings.TrimSpace(string(nsName)), strings.TrimSpace(string(podName)), true
 }
 
-func aggregateTopPods(processes []ProcessSample, limit int) []PodConsumer {
+func aggregateTopPods(processes []ProcessSample, samples []procSample, limit int) []PodConsumer {
 	type key struct {
 		namespace string
 		pod       string
 	}
 	buckets := map[key]*PodConsumer{}
+
+	for _, sample := range samples {
+		if sample.pod == "" {
+			continue
+		}
+		k := key{namespace: sample.namespace, pod: sample.pod}
+		current, ok := buckets[k]
+		if !ok {
+			current = &PodConsumer{Namespace: sample.namespace, Pod: sample.pod}
+			buckets[k] = current
+		}
+		current.RSSMB += sample.rssKB / 1024
+		if cacheMB := sample.cgroupCacheKB / 1024; cacheMB > current.CacheMB {
+			current.CacheMB = cacheMB
+		}
+		if sample.majorFaults > current.PageFaults {
+			current.PageFaults = sample.majorFaults
+		}
+	}
 
 	for _, proc := range processes {
 		if proc.Pod == "" {
@@ -257,7 +281,6 @@ func aggregateTopPods(processes []ProcessSample, limit int) []PodConsumer {
 			buckets[k] = current
 		}
 		current.CPUPercent += proc.CPUPercent
-		current.RSSMB += proc.RSSMB
 	}
 
 	items := make([]PodConsumer, 0, len(buckets))
