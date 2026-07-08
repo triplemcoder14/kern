@@ -20,8 +20,11 @@ rules:
     resources: [kernmonitors, kernmonitors/status, kernalertrules]
     verbs: [get, list, watch, create, update, patch, delete]
   - apiGroups: [""]
-    resources: [namespaces, serviceaccounts, services, configmaps]
+    resources: [namespaces, serviceaccounts, services, configmaps, pods]
     verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, watch]
   - apiGroups: [apps]
     resources: [daemonsets]
     verbs: [get, list, watch, create, update, patch, delete]
@@ -31,6 +34,9 @@ rules:
   - apiGroups: [""]
     resources: [events]
     verbs: [create, patch]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -71,8 +77,6 @@ spec:
           env:
             - name: KERN_AGENT_NAMESPACE
               value: {{ .Values.operator.agentNamespace | quote }}
-          args:
-            - --leader-elect
           ports:
             - name: metrics
               containerPort: 8080

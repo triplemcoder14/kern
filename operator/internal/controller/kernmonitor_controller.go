@@ -205,10 +205,9 @@ func (r *KernMonitorReconciler) ensureAgentRBAC(ctx context.Context, ns, monitor
 			{APIGroups: []string{"discovery.k8s.io"}, Resources: []string{"endpointslices"}, Verbs: []string{"get", "list", "watch"}},
 		},
 	}
-	if err := r.createOrUpdate(ctx, cr, func(current client.Object) {
-		current.(*rbacv1.ClusterRole).Rules = cr.Rules
-		current.(*rbacv1.ClusterRole).Labels = cr.Labels
-	}); err != nil {
+	// OpenShift blocks RBAC escalation: cluster-admin (Helm) should provision agent
+	// ClusterRole/Binding; the operator only creates them when absent.
+	if err := r.ensureClusterObject(ctx, cr); err != nil {
 		return err
 	}
 
@@ -228,11 +227,7 @@ func (r *KernMonitorReconciler) ensureAgentRBAC(ctx context.Context, ns, monitor
 			Namespace: ns,
 		}},
 	}
-	return r.createOrUpdate(ctx, crb, func(current client.Object) {
-		current.(*rbacv1.ClusterRoleBinding).Subjects = crb.Subjects
-		current.(*rbacv1.ClusterRoleBinding).RoleRef = crb.RoleRef
-		current.(*rbacv1.ClusterRoleBinding).Labels = crb.Labels
-	})
+	return r.ensureClusterObject(ctx, crb)
 }
 
 func (r *KernMonitorReconciler) ensureAgentDaemonSet(ctx context.Context, ns, monitorName string, spec kernv1alpha1.KernMonitorSpec) error {
@@ -345,6 +340,17 @@ func (r *KernMonitorReconciler) createOrUpdate(ctx context.Context, desired clie
 	}
 	mutate(current)
 	return r.Update(ctx, current)
+}
+
+// ensureClusterObject creates cluster-scoped RBAC once. Updates are skipped so
+// OpenShift does not reject RBAC escalation when Helm/cluster-admin provisions rules.
+func (r *KernMonitorReconciler) ensureClusterObject(ctx context.Context, desired client.Object) error {
+	key := client.ObjectKeyFromObject(desired)
+	current := desired.DeepCopyObject().(client.Object)
+	if err := r.Get(ctx, key, current); apierrors.IsNotFound(err) {
+		return r.Create(ctx, desired)
+	}
+	return client.IgnoreNotFound(err)
 }
 
 func setCondition(conditions *[]metav1.Condition, condType string, ready bool, message string) {

@@ -1,4 +1,5 @@
-FROM golang:1.25-alpine AS build
+# syntax=docker/dockerfile:1
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
 WORKDIR /src
 
 ENV GOPROXY=https://proxy.golang.org,direct
