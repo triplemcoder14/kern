@@ -20,6 +20,17 @@ import type {
   TimelineEvent,
 } from "../types/profiling";
 
+export function deriveNodesFromPods(
+  pods: Array<{ nodeName: string }>,
+): K8sNodeSummary[] {
+  const names = [...new Set(pods.map((pod) => pod.nodeName).filter(Boolean))].sort();
+  return names.map((name) => ({
+    name,
+    internalIPs: [],
+    ready: true,
+  }));
+}
+
 function normalizePSILevel(value?: string): PSILevel {
   if (value === "warn" || value === "critical") {
     return value;
