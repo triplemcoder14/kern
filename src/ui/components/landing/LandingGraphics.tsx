@@ -2,9 +2,21 @@
 
 import { KernWordmark } from "../KernWordmark";
 
-function Sparkline({ points, className }: { points: string; className?: string }) {
+function Sparkline({
+  points,
+  className,
+  live,
+}: {
+  points: string;
+  className?: string;
+  live?: boolean;
+}) {
   return (
-    <svg className={`landing-sparkline ${className ?? ""}`} viewBox="0 0 80 24" aria-hidden>
+    <svg
+      className={`landing-sparkline${live ? " landing-sparkline-live" : ""} ${className ?? ""}`}
+      viewBox="0 0 80 24"
+      aria-hidden
+    >
       <polyline points={points} className="landing-sparkline-line" />
     </svg>
   );
@@ -84,9 +96,15 @@ function nodeCenter(id: string) {
   return { x: node.x + 52, y: node.y + 22 };
 }
 
+function edgePath(from: string, to: string) {
+  const a = nodeCenter(from);
+  const b = nodeCenter(to);
+  return `M ${a.x} ${a.y} L ${b.x} ${b.y}`;
+}
+
 export function ProductMockup() {
   return (
-    <div className="landing-mock" aria-hidden>
+    <div className="landing-mock landing-mock-live" aria-hidden>
       <aside className="landing-mock-sidebar">
         <div className="landing-mock-sidebar-brand">
           <KernWordmark className="landing-mock-wordmark" />
@@ -107,32 +125,61 @@ export function ProductMockup() {
       <div className="landing-mock-body">
         <div className="landing-mock-toolbar">
           <span className="landing-mock-toolbar-title">Topology</span>
-          <span className="landing-mock-toolbar-meta">live · 14 services</span>
+          <span className="landing-mock-toolbar-meta">
+            <span className="landing-mock-live-dot" />
+            live · 14 services
+          </span>
         </div>
 
         <div className="landing-mock-canvas">
           <svg className="landing-mock-topo-edges" viewBox="0 0 640 240" preserveAspectRatio="xMidYMid meet">
-            {TOPO_EDGES.map(([from, to]) => {
+            {TOPO_EDGES.map(([from, to], edgeIndex) => {
               const a = nodeCenter(from);
               const b = nodeCenter(to);
+              const path = edgePath(from, to);
+              const isWarmPath =
+                from === "orders-service" ||
+                (from === "api-gateway" && to === "orders-service");
               return (
                 <g key={`${from}-${to}`}>
                   <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} className="landing-mock-edge" />
+                  <line
+                    x1={a.x}
+                    y1={a.y}
+                    x2={b.x}
+                    y2={b.y}
+                    className={`landing-mock-edge-flow${isWarmPath ? " landing-mock-edge-flow-warn" : ""}`}
+                    style={{ animationDelay: `${edgeIndex * 0.15}s` }}
+                  />
                   <polygon
                     points={`${b.x},${b.y} ${b.x - 6},${b.y - 3} ${b.x - 6},${b.y + 3}`}
                     className="landing-mock-edge-arrow"
                   />
+                  {[0, 1, 2].map((packetIndex) => (
+                    <circle
+                      key={packetIndex}
+                      r="2.5"
+                      className={`landing-mock-packet${isWarmPath ? " landing-mock-packet-warn" : ""}`}
+                    >
+                      <animateMotion
+                        dur={`${2.4 + edgeIndex * 0.35}s`}
+                        begin={`${packetIndex * 0.75 + edgeIndex * 0.18}s`}
+                        repeatCount="indefinite"
+                        path={path}
+                      />
+                    </circle>
+                  ))}
                 </g>
               );
             })}
           </svg>
 
           <div className="landing-mock-nodes">
-            {TOPO_NODES.map((node) => (
+            {TOPO_NODES.map((node, index) => (
               <div
                 key={node.id}
-                className={`landing-mock-node${node.id === "api-gateway" ? " landing-mock-node-active" : ""}`}
-                style={{ left: node.x, top: node.y }}
+                className={`landing-mock-node landing-mock-node-float${node.id === "api-gateway" ? " landing-mock-node-active" : ""}`}
+                style={{ left: node.x, top: node.y, animationDelay: `${index * 0.55}s` }}
               >
                 <span className="landing-mock-node-name">{node.id}</span>
                 <span className="landing-mock-node-pods">{node.pods}</span>
@@ -179,7 +226,7 @@ export function ProductMockup() {
             <div key={row.name} className="landing-mock-talker">
               <span>{row.name}</span>
               <span className="landing-mock-talker-bar">
-                <span className="landing-mock-talker-fill" style={{ width: `${row.pct}%` }} />
+                <span className="landing-mock-talker-fill landing-mock-talker-fill-live" style={{ width: `${row.pct}%` }} />
               </span>
             </div>
           ))}
@@ -192,7 +239,7 @@ export function ProductMockup() {
 export function FeatureIcon({
   kind,
 }: {
-  kind: "topology" | "flows" | "alerts" | "profiling" | "storage";
+  kind: "topology" | "flows" | "alerts" | "workloads" | "profiling" | "storage";
 }) {
   const icons = {
     topology: (
@@ -213,6 +260,14 @@ export function FeatureIcon({
       <svg viewBox="0 0 24 24" aria-hidden>
         <path d="M12 4a5 5 0 0 1 5 5v4l2 3H5l2-3V9a5 5 0 0 1 5-5Z" />
         <path d="M10 18a2 2 0 0 0 4 0" />
+      </svg>
+    ),
+    workloads: (
+      <svg viewBox="0 0 24 24" aria-hidden>
+        <rect x="4" y="5" width="7" height="6" rx="1.5" />
+        <rect x="13" y="5" width="7" height="6" rx="1.5" />
+        <rect x="4" y="13" width="7" height="6" rx="1.5" />
+        <rect x="13" y="13" width="7" height="6" rx="1.5" />
       </svg>
     ),
     profiling: (
@@ -254,7 +309,7 @@ function FeaturesDoodles() {
 }
 
 export interface LandingFeature {
-  id: "topology" | "flows" | "alerts" | "profiling" | "storage";
+  id: "topology" | "flows" | "alerts" | "workloads" | "profiling" | "storage";
   label: string;
   body: string;
   accent: "ok" | "warn" | "line" | "neutral";
@@ -265,11 +320,11 @@ export function FeaturesSection({ features }: { features: readonly LandingFeatur
     <div className="landing-features-stage">
       <FeaturesDoodles />
       <div className="landing-features-row">
-        {features.map((feature, index) => (
+        {features.map((feature) => (
           <article
             key={feature.id}
             id={`feature-${feature.id}`}
-            className={`landing-feature-card landing-feature-card-${feature.accent}${index % 2 === 1 ? " landing-feature-card-offset" : ""}`}
+            className={`landing-feature-card landing-feature-card-${feature.accent}`}
           >
             <FeatureIcon kind={feature.id} />
             <div className="landing-feature-card-copy">
@@ -329,7 +384,7 @@ function talkKindLabel(kind: (typeof TALK_EVENTS)[number]["kind"]): string {
 
 export function TalkEventsPreview() {
   return (
-    <div className="landing-events-preview" aria-hidden>
+    <div className="landing-events-preview landing-events-preview-live-panel" aria-hidden>
       <div className="landing-events-chrome">
         <div className="landing-events-chrome-dots">
           <span />
@@ -346,36 +401,50 @@ export function TalkEventsPreview() {
           <span className="landing-events-tab landing-events-tab-accent">Degradation</span>
           <span className="landing-events-tab">Kubernetes</span>
         </div>
-        <span className="landing-events-preview-live">live</span>
+        <span className="landing-events-preview-live">
+          <span className="landing-events-live-dot" />
+          live
+        </span>
       </div>
 
       <div className="landing-events-stats">
-        <div className="landing-events-stat">
+        <div className="landing-events-stat landing-events-stat-float">
           <span className="landing-events-stat-label">Talk paths</span>
           <span className="landing-events-stat-value">24</span>
         </div>
-        <div className="landing-events-stat landing-events-stat-warn">
+        <div className="landing-events-stat landing-events-stat-warn landing-events-stat-float landing-events-stat-pulse">
           <span className="landing-events-stat-label">Degraded</span>
           <span className="landing-events-stat-value">2</span>
         </div>
-        <div className="landing-events-stat">
+        <div className="landing-events-stat landing-events-stat-float">
           <span className="landing-events-stat-label">Started (5m)</span>
-          <span className="landing-events-stat-value">8</span>
+          <span className="landing-events-stat-value landing-events-stat-value-live">8</span>
         </div>
-        <div className="landing-events-stat">
+        <div className="landing-events-stat landing-events-stat-float">
           <span className="landing-events-stat-label">Ended (5m)</span>
           <span className="landing-events-stat-value">5</span>
         </div>
       </div>
 
       <div className="landing-events-stream">
-        {TALK_EVENTS.map((event) => (
-          <div key={`${event.time}-${event.path}`} className={`landing-events-row landing-events-row-${event.tone}`}>
+        <div className="landing-events-stream-scan" aria-hidden />
+        {TALK_EVENTS.map((event, index) => (
+          <div
+            key={`${event.time}-${event.path}`}
+            className={`landing-events-row landing-events-row-${event.tone} landing-events-row-live${index === 0 ? " landing-events-row-new" : ""}`}
+            style={{ animationDelay: `${index * 0.12}s` }}
+          >
             <span className="landing-events-time">{event.time}</span>
             <span className={`landing-events-kind landing-events-kind-${event.kind}`}>
               {talkKindLabel(event.kind)}
             </span>
-            <span className="landing-events-path">{event.path}</span>
+            <span className={`landing-events-path landing-events-path-${event.tone}`}>
+              <span
+                className="landing-events-path-packet"
+                style={{ animationDelay: `${index * 0.45 + 0.2}s` }}
+              />
+              {event.path}
+            </span>
             <span className={`landing-events-detail landing-events-detail-${event.tone}`}>{event.detail}</span>
           </div>
         ))}
@@ -418,7 +487,14 @@ function FlamegraphSvg() {
       <text x="8" y="37" className="landing-flame-label">
         tcp_connect
       </text>
-      <rect x="232" y="24" width="128" height="20" rx="3" className="landing-flame-block landing-flame-warn" />
+      <rect
+        x="232"
+        y="24"
+        width="128"
+        height="20"
+        rx="3"
+        className="landing-flame-block landing-flame-warn landing-flame-live-hot"
+      />
       <text x="240" y="37" className="landing-flame-label">
         redis.svc:6379
       </text>
@@ -427,7 +503,14 @@ function FlamegraphSvg() {
       <text x="8" y="61" className="landing-flame-label">
         sock_recv
       </text>
-      <rect x="136" y="48" width="108" height="20" rx="3" className="landing-flame-block landing-flame-warn" />
+      <rect
+        x="136"
+        y="48"
+        width="108"
+        height="20"
+        rx="3"
+        className="landing-flame-block landing-flame-warn landing-flame-live-hot"
+      />
       <text x="144" y="61" className="landing-flame-label">
         redis:6379
       </text>
@@ -436,17 +519,38 @@ function FlamegraphSvg() {
         dns_lookup
       </text>
 
-      <rect x="136" y="72" width="72" height="20" rx="3" className="landing-flame-block landing-flame-bad" />
+      <rect
+        x="136"
+        y="72"
+        width="72"
+        height="20"
+        rx="3"
+        className="landing-flame-block landing-flame-bad landing-flame-live-bad"
+      />
       <text x="144" y="85" className="landing-flame-label">
         conntrack
       </text>
+
+      {[0, 1].map((packetIndex) => (
+        <circle key={packetIndex} r="2" className="landing-flame-packet landing-flame-packet-warn">
+          <animateMotion
+            dur="2.4s"
+            begin={`${packetIndex * 0.9}s`}
+            repeatCount="indefinite"
+            path="M 228 34 L 360 34"
+          />
+        </circle>
+      ))}
+      <circle r="2" className="landing-flame-packet landing-flame-packet-bad">
+        <animateMotion dur="2.2s" begin="0.4s" repeatCount="indefinite" path="M 190 58 L 190 82" />
+      </circle>
     </svg>
   );
 }
 
 export function ProfilingPreview() {
   return (
-    <div className="landing-profile-preview" aria-hidden>
+    <div className="landing-profile-preview landing-profile-preview-live-panel" aria-hidden>
       <div className="landing-profile-chrome">
         <div className="landing-profile-chrome-dots">
           <span />
@@ -464,20 +568,26 @@ export function ProfilingPreview() {
         </div>
         <div className="landing-profile-toolbar-right">
           <span className="landing-profile-toolbar-sample">Sample 3s</span>
-          <span className="landing-profile-preview-live">live</span>
+          <span className="landing-profile-preview-live">
+            <span className="landing-profile-live-dot" />
+            live
+          </span>
         </div>
       </div>
 
       <div className="landing-profile-preview-body">
         <aside className="landing-profile-nodes">
           <span className="landing-profile-nodes-label">Node pool</span>
-          {PROFILE_NODES.map((node) => (
+          {PROFILE_NODES.map((node, index) => (
             <div
               key={node.name}
-              className={`landing-profile-node${node.active ? " landing-profile-node-active" : ""}`}
+              className={`landing-profile-node landing-profile-node-float${node.active ? " landing-profile-node-active landing-profile-node-pulse" : ""}`}
+              style={{ animationDelay: `${index * 0.45}s` }}
             >
               <span className="landing-profile-node-row">
-                <span className={`landing-profile-health landing-profile-health-${node.health}`} />
+                <span
+                  className={`landing-profile-health landing-profile-health-${node.health}${node.health === "warn" ? " landing-profile-health-pulse" : ""}`}
+                />
                 {node.name}
               </span>
               <span className={`landing-profile-node-meta landing-profile-node-meta-${node.health}`}>
@@ -490,14 +600,21 @@ export function ProfilingPreview() {
 
         <div className="landing-profile-main">
           <div className="landing-profile-metrics">
-            {PROFILE_METRICS.map((metric) => (
-              <div key={metric.label} className="landing-profile-metric">
+            {PROFILE_METRICS.map((metric, index) => (
+              <div
+                key={metric.label}
+                className={`landing-profile-metric landing-profile-metric-float${metric.tone === "warn" || metric.tone === "bad" ? " landing-profile-metric-hot" : ""}`}
+                style={{ animationDelay: `${index * 0.55}s` }}
+              >
                 <span className="landing-profile-metric-label">{metric.label}</span>
-                <span className={`landing-profile-metric-value landing-profile-metric-${metric.tone}`}>
+                <span
+                  className={`landing-profile-metric-value landing-profile-metric-${metric.tone}${metric.tone === "warn" || metric.tone === "bad" ? " landing-profile-metric-value-pulse" : ""}`}
+                >
                   {metric.value}
                 </span>
                 <Sparkline
                   points={metric.spark}
+                  live
                   className={
                     metric.tone === "warn"
                       ? "landing-sparkline-warn"
@@ -516,25 +633,41 @@ export function ProfilingPreview() {
             <span className="landing-profile-tab">Flows</span>
           </div>
 
-          <div className="landing-profile-flamegraph-wrap">
+          <div className="landing-profile-flamegraph-wrap landing-profile-flamegraph-live-wrap">
             <span className="landing-profile-panel-label">Flame stack</span>
-            <FlamegraphSvg />
+            <div className="landing-profile-flamegraph-stage">
+              <FlamegraphSvg />
+              <div className="landing-profile-flame-scan" aria-hidden />
+            </div>
           </div>
 
           <div className="landing-profile-events">
+            <div className="landing-profile-events-scan" aria-hidden />
             <div className="landing-profile-events-head">
               <span>Time</span>
               <span>Sev</span>
               <span>Event</span>
               <span>Value</span>
             </div>
-            {NET_LOG.map((line) => (
-              <div key={`${line.time}-${line.event}`} className="landing-profile-log-row">
+            {NET_LOG.map((line, index) => (
+              <div
+                key={`${line.time}-${line.event}`}
+                className={`landing-profile-log-row landing-profile-log-row-live landing-profile-log-${line.tone}${index === 0 ? " landing-profile-log-row-new" : ""}${line.tone === "warn" || line.tone === "bad" ? " landing-profile-log-row-alert" : ""}`}
+                style={{ animationDelay: `${index * 0.12}s` }}
+              >
                 <span className="landing-profile-log-time">{line.time}</span>
                 <span className={`landing-profile-log-sev landing-profile-log-${line.tone}`}>
                   {line.sev}
                 </span>
-                <span className="landing-profile-log-msg">{line.event}</span>
+                <span className="landing-profile-log-msg">
+                  {(line.tone === "warn" || line.tone === "bad") && (
+                    <span
+                      className="landing-profile-log-packet"
+                      style={{ animationDelay: `${index * 0.4 + 0.15}s` }}
+                    />
+                  )}
+                  {line.event}
+                </span>
                 <span className={`landing-profile-log-val landing-profile-log-${line.tone}`}>
                   {line.val}
                 </span>
@@ -611,6 +744,68 @@ export function ConnectClusterFlow() {
       <p className="landing-arch-caption">
         Agent and collector in-cluster. One API. Full visibility from the kernel up — no per-pod
         sidecars.
+      </p>
+    </div>
+  );
+}
+
+function FooterChip({ kind }: { kind: "topo" | "flow" | "kernel" }) {
+  if (kind === "topo") {
+    return (
+      <span className="landing-footer-chip landing-footer-chip-topo" aria-hidden>
+        <svg viewBox="0 0 76 46" preserveAspectRatio="xMidYMid slice">
+          <circle cx="14" cy="23" r="3" className="landing-footer-chip-node" />
+          <circle cx="38" cy="14" r="3" className="landing-footer-chip-node" />
+          <circle cx="62" cy="23" r="3" className="landing-footer-chip-node" />
+          <circle cx="38" cy="32" r="3" className="landing-footer-chip-node landing-footer-chip-node-bright" />
+          <path d="M17 22 L35 15 M41 15 L59 22 M38 17 L38 29" className="landing-footer-chip-edge" />
+        </svg>
+      </span>
+    );
+  }
+
+  if (kind === "flow") {
+    return (
+      <span className="landing-footer-chip landing-footer-chip-flow" aria-hidden>
+        <svg viewBox="0 0 76 46" preserveAspectRatio="xMidYMid slice">
+          <path d="M8 14 H68" className="landing-footer-chip-row" />
+          <path d="M8 23 H52" className="landing-footer-chip-row landing-footer-chip-row-warn" />
+          <path d="M8 32 H60" className="landing-footer-chip-row" />
+          <circle cx="62" cy="23" r="2.5" className="landing-footer-chip-dot-warn" />
+        </svg>
+      </span>
+    );
+  }
+
+  return (
+    <span className="landing-footer-chip landing-footer-chip-kernel" aria-hidden>
+      <svg viewBox="0 0 76 46" preserveAspectRatio="xMidYMid slice">
+        <rect x="8" y="10" width="60" height="7" rx="1.5" className="landing-footer-chip-bar landing-footer-chip-bar-ok" />
+        <rect x="8" y="20" width="44" height="7" rx="1.5" className="landing-footer-chip-bar landing-footer-chip-bar-ok" />
+        <rect x="54" y="20" width="14" height="7" rx="1.5" className="landing-footer-chip-bar landing-footer-chip-bar-warn" />
+        <rect x="24" y="30" width="22" height="7" rx="1.5" className="landing-footer-chip-bar landing-footer-chip-bar-bad" />
+      </svg>
+    </span>
+  );
+}
+
+export function FooterManifesto() {
+  return (
+    <div className="landing-footer-manifesto">
+      <p className="landing-footer-manifesto-copy">
+        <span className="landing-footer-manifesto-line">
+          Observability that <FooterChip kind="topo" />
+        </span>
+        <span className="landing-footer-manifesto-line">
+          <span className="landing-footer-accent landing-footer-accent-line">maps topology,</span>{" "}
+          <FooterChip kind="flow" />
+          <span className="landing-footer-accent landing-footer-accent-warn"> hears talk paths,</span>
+        </span>
+        <span className="landing-footer-manifesto-line">
+          and <span className="landing-footer-accent landing-footer-accent-ok">profiles the kernel</span>{" "}
+          <FooterChip kind="kernel" />
+        </span>
+        <span className="landing-footer-manifesto-line">from the node up.</span>
       </p>
     </div>
   );
