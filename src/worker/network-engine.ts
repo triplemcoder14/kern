@@ -9,7 +9,7 @@ import type { MonitorEvent } from "../core/types/monitoring";
 import type { NetworkFlow, NetworkSnapshot, NetworkTopology } from "../core/types/network";
 
 const MAX_FLOWS = 200;
-const POLL_MS = 3_000;
+const POLL_MS = 8_000;
 
 export class NetworkEngine {
   private topology: NetworkTopology = { nodes: [], edges: [], updatedAt: "" };

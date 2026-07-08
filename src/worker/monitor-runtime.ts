@@ -36,7 +36,7 @@ import type {
 } from "../core/types/monitoring";
 import type { MonitorPersistence } from "./persistence/port";
 import { NetworkEngine } from "./network-engine";
-import { buildProfileSnapshot } from "../core/profiling/build-node-profile";
+import { buildProfileSnapshot, deriveNodesFromPods } from "../core/profiling/build-node-profile";
 import type { AgentProfilePayload, ProfileSnapshot } from "../core/types/profiling";
 import type { NetworkSnapshot } from "../core/types/network";
 
@@ -45,12 +45,16 @@ type EventHandler = (event: MonitorWorkerEvent) => void;
 const MAX_EVENTS = 300;
 const POLL_INTERVAL_MS = 15_000;
 const EVENT_POLL_INTERVAL_MS = 3_000;
+const HEALTH_EMIT_MIN_MS = 2_000;
+const NETWORK_EMIT_MIN_MS = 4_000;
+const SNAPSHOT_PERSIST_MIN_MS = 30_000;
 const SEED_EVENT_LIMIT = 100;
 const DEFAULT_EBPF_URL = "http://127.0.0.1:9474";
 const DEFAULT_K8S_PROXY = "http://127.0.0.1:8001";
 const DEFAULT_ALERT_RULES_NAMESPACE = "kern";
 const DEFAULT_ALERT_RULES_CONFIGMAP = "kern-alert-rules";
-const AGENT_PROFILE_TIMEOUT_MS = 2_500;
+const AGENT_PROFILE_TIMEOUT_MS = 5_000;
+const DEFAULT_AGENT_NAMESPACE = "kern";
 
 function resolveProxyUrl(proxyUrl?: string): string {
   if (proxyUrl?.startsWith("http")) {
@@ -99,6 +103,10 @@ export class MonitorRuntime {
   private lastNetworkSnapshot: NetworkSnapshot | null = null;
   private introspection = new NetworkIntrospectionEngine();
   private declarativeAlertRules: DeclarativeAlertRule[] = [];
+  private healthEmitTimer: ReturnType<typeof setTimeout> | null = null;
+  private networkEmitTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingNetworkSnapshot: NetworkSnapshot | null = null;
+  private lastSnapshotPersistAt = 0;
 
   private readonly persistence: MonitorPersistence;
 
@@ -220,9 +228,21 @@ export class MonitorRuntime {
 
     this.networkEngine.configure(ebpfCollectorUrl, origin);
     this.networkEngine.onUpdate((snapshot) => {
-      this.emit({ type: "NETWORK_SNAPSHOT", snapshot });
-      void this.onNetworkSnapshot(snapshot);
-      this.emitHealth();
+      this.pendingNetworkSnapshot = snapshot;
+      if (this.networkEmitTimer) {
+        return;
+      }
+      this.networkEmitTimer = setTimeout(() => {
+        this.networkEmitTimer = null;
+        const pending = this.pendingNetworkSnapshot;
+        this.pendingNetworkSnapshot = null;
+        if (!pending) {
+          return;
+        }
+        this.emit({ type: "NETWORK_SNAPSHOT", snapshot: pending });
+        void this.onNetworkSnapshot(pending);
+        this.scheduleHealthEmit();
+      }, NETWORK_EMIT_MIN_MS);
     });
     this.networkEngine.start(this.client);
 
@@ -460,6 +480,15 @@ export class MonitorRuntime {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    if (this.healthEmitTimer) {
+      clearTimeout(this.healthEmitTimer);
+      this.healthEmitTimer = null;
+    }
+    if (this.networkEmitTimer) {
+      clearTimeout(this.networkEmitTimer);
+      this.networkEmitTimer = null;
+    }
+    this.pendingNetworkSnapshot = null;
   }
 
   private async runEventWatch(): Promise<void> {
@@ -517,12 +546,12 @@ export class MonitorRuntime {
     }
   }
 
+  private persistLater(task: () => Promise<void>): void {
+    void task().catch(() => undefined);
+  }
+
   private async ingestEvent(event: MonitorEvent, persist = true): Promise<void> {
     this.pushEvent(event);
-
-    if (persist) {
-      await this.persistence.saveMonitorEvent(event);
-    }
     this.eventTimestamps.push(Date.now());
     this.eventTimestamps = this.eventTimestamps.filter((ts) => Date.now() - ts < 60_000);
 
@@ -532,7 +561,11 @@ export class MonitorRuntime {
     }
     await this.syncIncident(event);
 
-    this.emitHealth();
+    this.scheduleHealthEmit();
+
+    if (persist) {
+      this.persistLater(() => this.persistence.saveMonitorEvent(event));
+    }
   }
 
   private async syncIncident(event: MonitorEvent): Promise<void> {
@@ -559,7 +592,7 @@ export class MonitorRuntime {
 
     const incident = existing ? mergeIncident(existing, event) : { ...derived, alertSource: "kubernetes" as const };
     this.incidents.set(incident.id, incident);
-    await this.persistence.saveIncident(incident);
+    this.persistLater(() => this.persistence.saveIncident(incident));
     this.emit({ type: "INCIDENT_UPSERTED", incident });
   }
 
@@ -570,7 +603,13 @@ export class MonitorRuntime {
       await this.ingestEvent(event);
     }
 
-    await this.persistence.saveNetworkSnapshot?.(snapshot);
+    const now = Date.now();
+    if (now - this.lastSnapshotPersistAt >= SNAPSHOT_PERSIST_MIN_MS) {
+      this.lastSnapshotPersistAt = now;
+      this.persistLater(async () => {
+        await this.persistence.saveNetworkSnapshot?.(snapshot);
+      });
+    }
 
     const alerts = mergeFlowAlerts(
       evaluateFlowAlerts(snapshot, previous),
@@ -583,7 +622,7 @@ export class MonitorRuntime {
       const existing = this.incidents.get(incident.id);
       const next = existing?.status === "open" ? mergeFlowIncident(existing, alert) : incident;
       this.incidents.set(next.id, next);
-      await this.persistence.saveIncident(next);
+      this.persistLater(() => this.persistence.saveIncident(next));
       this.emit({ type: "INCIDENT_UPSERTED", incident: next });
     }
 
@@ -601,7 +640,7 @@ export class MonitorRuntime {
           updatedAt: new Date().toISOString(),
         };
         this.incidents.set(id, resolved);
-        await this.persistence.saveIncident(resolved);
+        this.persistLater(() => this.persistence.saveIncident(resolved));
         this.emit({ type: "INCIDENT_RESOLVED", incidentId: id });
       }
     }
@@ -641,7 +680,25 @@ export class MonitorRuntime {
   }
 
   private emitHealth(): void {
-    this.emit({ type: "HEALTH_UPDATE", snapshot: this.buildHealthSnapshot() });
+    this.scheduleHealthEmit(true);
+  }
+
+  private scheduleHealthEmit(immediate = false): void {
+    if (immediate) {
+      if (this.healthEmitTimer) {
+        clearTimeout(this.healthEmitTimer);
+        this.healthEmitTimer = null;
+      }
+      this.emit({ type: "HEALTH_UPDATE", snapshot: this.buildHealthSnapshot() });
+      return;
+    }
+    if (this.healthEmitTimer) {
+      return;
+    }
+    this.healthEmitTimer = setTimeout(() => {
+      this.healthEmitTimer = null;
+      this.emit({ type: "HEALTH_UPDATE", snapshot: this.buildHealthSnapshot() });
+    }, HEALTH_EMIT_MIN_MS);
   }
 
   private async fetchAgentProfileFromUrl(baseUrl: string): Promise<AgentProfilePayload | null> {
@@ -664,35 +721,57 @@ export class MonitorRuntime {
     }
   }
 
+  private async fetchAgentProfileViaPodProxy(
+    namespace: string,
+    podName: string,
+    port: number,
+  ): Promise<AgentProfilePayload | null> {
+    if (!this.client) {
+      return null;
+    }
+    try {
+      const response = await this.client.fetchPodProxy(
+        namespace,
+        podName,
+        port,
+        "/api/v1/profile",
+      );
+      if (!response.ok) {
+        return null;
+      }
+      const body = (await response.json()) as { profile?: AgentProfilePayload };
+      return body.profile ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   private async fetchAllAgentProfiles(): Promise<Map<string, AgentProfilePayload>> {
     const profiles = new Map<string, AgentProfilePayload>();
     const baseUrl = resolveEbpfUrl(this.config?.ebpfCollectorUrl);
     const port = parseAgentPort(baseUrl);
+    const namespace = DEFAULT_AGENT_NAMESPACE;
+
+    if (this.client) {
+      try {
+        const agentPods = await this.client.listLabeledPods(namespace, "app=kern-agent");
+        await Promise.all(
+          agentPods.map(async (pod) => {
+            const profile = await this.fetchAgentProfileViaPodProxy(namespace, pod.name, port);
+            if (profile?.node_name) {
+              profiles.set(profile.node_name, profile);
+            }
+          }),
+        );
+      } catch {
+        // Fall back to direct agent URL below.
+      }
+    }
 
     const primary = await this.fetchAgentProfileFromUrl(baseUrl);
-    if (primary?.node_name) {
+    if (primary?.node_name && !profiles.has(primary.node_name)) {
       profiles.set(primary.node_name, primary);
     }
-
-    if (!this.client) {
-      return profiles;
-    }
-
-    const nodes = await this.client.listNodes();
-    await Promise.all(
-      nodes.map(async (node) => {
-        if (profiles.has(node.name)) {
-          return;
-        }
-        for (const ip of node.internalIPs) {
-          const profile = await this.fetchAgentProfileFromUrl(`http://${ip}:${port}`);
-          if (profile?.node_name) {
-            profiles.set(profile.node_name, profile);
-            return;
-          }
-        }
-      }),
-    );
 
     return profiles;
   }
@@ -705,9 +784,18 @@ export class MonitorRuntime {
       };
     }
 
-    const [nodes, pods, agentProfiles, nodeMetrics] = await Promise.all([
-      this.client.listNodes(),
-      this.client.listPodsOnNodes(),
+    const pods = await this.client.listPodsOnNodes().catch(() => []);
+    let nodes: Awaited<ReturnType<K8sApiClient["listNodes"]>> = [];
+    try {
+      nodes = await this.client.listNodes();
+    } catch {
+      nodes = [];
+    }
+    if (nodes.length === 0) {
+      nodes = deriveNodesFromPods(pods);
+    }
+
+    const [agentProfiles, nodeMetrics] = await Promise.all([
       this.fetchAllAgentProfiles(),
       this.client.listNodeMetrics().catch(() => new Map()),
     ]);

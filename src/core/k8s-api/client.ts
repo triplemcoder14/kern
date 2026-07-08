@@ -320,6 +320,38 @@ export class K8sApiClient {
       .filter((pod) => pod.nodeName.length > 0);
   }
 
+  async listLabeledPods(
+    namespace: string,
+    labelSelector: string,
+  ): Promise<Array<{ name: string; nodeName: string }>> {
+    const query = new URLSearchParams({ labelSelector });
+    const response = await this.fetchWithTimeout(
+      `/api/v1/namespaces/${encodeURIComponent(namespace)}/pods?${query.toString()}`,
+    );
+    if (!response.ok) {
+      throw new Error(`Failed to list pods in ${namespace} (${response.status})`);
+    }
+    const body = (await response.json()) as K8sList<K8sPodObject>;
+    return (body.items ?? [])
+      .map((pod) => ({
+        name: pod.metadata.name,
+        nodeName: pod.spec?.nodeName ?? "",
+      }))
+      .filter((pod) => pod.name.length > 0 && pod.nodeName.length > 0);
+  }
+
+  async fetchPodProxy(
+    namespace: string,
+    podName: string,
+    port: number,
+    proxyPath: string,
+  ): Promise<Response> {
+    const normalized = proxyPath.startsWith("/") ? proxyPath : `/${proxyPath}`;
+    return this.fetchWithTimeout(
+      `/api/v1/namespaces/${encodeURIComponent(namespace)}/pods/${encodeURIComponent(podName)}:${port}/proxy${normalized}`,
+    );
+  }
+
   async watchEvents(
     resourceVersion: string,
     onEvent: (event: K8sEventObject, type: "ADDED" | "MODIFIED" | "DELETED") => void,
