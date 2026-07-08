@@ -19,10 +19,14 @@ const EMPTY_STORE: StoreShape = {
 };
 
 const MONITOR_STORE_KEY = "monitor-store.json";
+const STORE_FLUSH_MS = 3_000;
 
 export class MonitorPersistenceImpl implements MonitorPersistence {
   private readonly snapshots: SnapshotStore;
   private writeQueue: Promise<void> = Promise.resolve();
+  private memoryStore: StoreShape | null = null;
+  private storeDirty = false;
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private readonly store: ObjectStore) {
     this.snapshots = new SnapshotStore(store);
@@ -37,24 +41,59 @@ export class MonitorPersistenceImpl implements MonitorPersistence {
   }
 
   private async readStore(): Promise<StoreShape> {
+    if (this.memoryStore) {
+      return this.memoryStore;
+    }
     const raw = await this.store.readText(MONITOR_STORE_KEY);
     if (!raw) {
-      return { ...EMPTY_STORE };
+      this.memoryStore = { ...EMPTY_STORE };
+      return this.memoryStore;
     }
     const parsed = { ...EMPTY_STORE, ...JSON.parse(raw) } as StoreShape;
     const normalized = this.normalizeStore(parsed);
+    this.memoryStore = normalized;
     if (
       normalized.events.length !== parsed.events.length ||
       normalized.incidents.length !== parsed.incidents.length
     ) {
-      await this.store.writeText(MONITOR_STORE_KEY, JSON.stringify(normalized, null, 2));
+      this.storeDirty = true;
+      this.scheduleFlush();
     }
-    return normalized;
+    return this.memoryStore;
   }
 
-  private async writeStore(store: StoreShape): Promise<void> {
-    const normalized = this.normalizeStore(store);
-    await this.store.writeText(MONITOR_STORE_KEY, JSON.stringify(normalized, null, 2));
+  private scheduleFlush(): void {
+    if (this.flushTimer) {
+      return;
+    }
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      void this.flushStore();
+    }, STORE_FLUSH_MS);
+  }
+
+  private async flushStore(): Promise<void> {
+    if (!this.storeDirty || !this.memoryStore) {
+      return;
+    }
+    await this.enqueue(async () => {
+      if (!this.memoryStore || !this.storeDirty) {
+        return;
+      }
+      const normalized = this.normalizeStore(this.memoryStore);
+      this.memoryStore = normalized;
+      await this.store.writeText(MONITOR_STORE_KEY, JSON.stringify(normalized, null, 2));
+      this.storeDirty = false;
+    });
+  }
+
+  private touchStore(mutator: (store: StoreShape) => void): Promise<void> {
+    return this.enqueue(async () => {
+      const store = await this.readStore();
+      mutator(store);
+      this.storeDirty = true;
+      this.scheduleFlush();
+    });
   }
 
   private enqueue<T>(task: () => Promise<T>): Promise<T> {
@@ -67,11 +106,9 @@ export class MonitorPersistenceImpl implements MonitorPersistence {
   }
 
   saveConnectionConfig(config: SavedConnectionConfig): Promise<void> {
-    return this.enqueue(async () => {
-      const store = await this.readStore();
+    return this.touchStore((store) => {
       store.connection = config;
-      await this.writeStore(store);
-    });
+    }).then(() => this.flushStore());
   }
 
   loadConnectionConfig(): Promise<SavedConnectionConfig | null> {
@@ -82,16 +119,13 @@ export class MonitorPersistenceImpl implements MonitorPersistence {
   }
 
   clearConnectionConfig(): Promise<void> {
-    return this.enqueue(async () => {
-      const store = await this.readStore();
+    return this.touchStore((store) => {
       store.connection = null;
-      await this.writeStore(store);
-    });
+    }).then(() => this.flushStore());
   }
 
   saveMonitorEvent(event: MonitorEvent): Promise<void> {
-    return this.enqueue(async () => {
-      const store = await this.readStore();
+    return this.touchStore((store) => {
       const index = store.events.findIndex((item) => item.id === event.id);
       if (index >= 0) {
         store.events[index] = event;
@@ -99,7 +133,6 @@ export class MonitorPersistenceImpl implements MonitorPersistence {
         store.events.unshift(event);
       }
       store.events = trimMonitorEvents(store.events);
-      await this.writeStore(store);
     });
   }
 
@@ -113,15 +146,13 @@ export class MonitorPersistenceImpl implements MonitorPersistence {
   }
 
   saveIncident(incident: Incident): Promise<void> {
-    return this.enqueue(async () => {
-      const store = await this.readStore();
+    return this.touchStore((store) => {
       const index = store.incidents.findIndex((item) => item.id === incident.id);
       if (index >= 0) {
         store.incidents[index] = incident;
       } else {
         store.incidents.unshift(incident);
       }
-      await this.writeStore(store);
     });
   }
 
@@ -133,16 +164,14 @@ export class MonitorPersistenceImpl implements MonitorPersistence {
   }
 
   resolveIncidentInDb(incidentId: string): Promise<void> {
-    return this.enqueue(async () => {
-      const store = await this.readStore();
+    return this.touchStore((store) => {
       const incident = store.incidents.find((item) => item.id === incidentId);
       if (!incident) {
         return;
       }
       incident.status = "resolved";
       incident.updatedAt = new Date().toISOString();
-      await this.writeStore(store);
-    });
+    }).then(() => this.flushStore());
   }
 
   saveNetworkSnapshot(snapshot: NetworkSnapshot): Promise<void> {
