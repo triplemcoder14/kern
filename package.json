@@ -2,6 +2,7 @@
   "name": "kern",
   "private": true,
   "version": "0.6.0",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/triplemcoder14/kern.git"
@@ -9,7 +10,7 @@
   "type": "module",
   "scripts": {
     "start": "bash scripts/start-kern.sh",
-    "dev": "concurrently -n web,api -c cyan,magenta \"npm run dev:web\" \"npm run dev:api\"",
+    "dev": "concurrently -n web,api -c cyan,magenta \"npm run dev:web\" \"KERN_USERNAME=admin KERN_PASSWORD=change-me-on-install KERN_AUTH_SECRET=kern-dev-auth-secret-change-me npm run dev:api\"",
     "dev:web": "vite",
     "dev:api": "npm run start:dev --prefix api",
     "build": "npm run build:web && npm run build --prefix api",
@@ -18,7 +19,6 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "idb": "^8.0.3",
     "js-yaml": "^5.2.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",

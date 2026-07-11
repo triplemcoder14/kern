@@ -1,16 +1,20 @@
 import { useState } from "react";
-import { configToConnectInput, saveClusterConfig, type ClusterConfig } from "../../core/config/cluster-config";
+import { renderCloudPage } from "@kern/platform";
+import { configToConnectInput, loadClusterConfig, saveClusterConfig, type ClusterConfig } from "../../core/config/cluster-config";
+import { isAlertSoundMuted, setAlertSoundMuted, unlockAlertSound } from "../lib/alert-sound";
 import { AppShell, type NavId, type NavPage } from "../components/AppShell";
 import { AlertsDashboard } from "../components/AlertsDashboard";
 import { FlowsDashboard } from "../components/FlowsDashboard";
 import { LiveEventStream } from "../components/LiveEventStream";
 import { NetworkAnalysisDashboard } from "../components/NetworkAnalysisDashboard";
 import { OverviewDashboard } from "../components/OverviewDashboard";
+import { ProfilingDashboard } from "../components/ProfilingDashboard";
 import { SettingsView } from "../components/SettingsView";
 import { TopologyDashboard } from "../components/TopologyDashboard";
 import { WorkloadsDashboard } from "../components/WorkloadsDashboard";
 import { useAuth } from "../hooks/useAuth";
 import { useMonitor } from "../hooks/useMonitor";
+import { useNetworkTalkAlertSound } from "../hooks/useNetworkTalkAlertSound";
 
 export function ConsoleApp() {
   const monitor = useMonitor();
@@ -19,13 +23,31 @@ export function ConsoleApp() {
   const [activeNav, setActiveNav] = useState<NavId>("overview");
   const [namespace, setNamespace] = useState("all");
   const [paused, setPaused] = useState(false);
+  const [soundMuted, setSoundMuted] = useState(isAlertSoundMuted);
+
+  useNetworkTalkAlertSound(monitor.events, soundMuted, monitor.health.connected);
+
+  const handleSoundMutedChange = (muted: boolean) => {
+    setSoundMuted(muted);
+    setAlertSoundMuted(muted);
+    if (!muted) {
+      void unlockAlertSound();
+    }
+  };
 
   const handleConnect = async (config: ClusterConfig) => {
     saveClusterConfig(config);
     await monitor.connect(configToConnectInput(config));
   };
 
-  const clusterName = monitor.connection?.clusterName ?? "disconnected";
+  const savedClusterName = loadClusterConfig().clusterName.trim() || "minikube";
+  const clusterName = monitor.connection?.clusterName?.trim()
+    || (monitor.health.connected ? monitor.health.clusterName : savedClusterName)
+    || savedClusterName;
+  const cloudPage = renderCloudPage(page, {
+    user,
+    onNavigate: (nextPage) => handleNavigate(nextPage, nextPage),
+  });
 
   const handleNavigate = (nav: NavId, nextPage: NavPage) => {
     setActiveNav(nav);
@@ -50,6 +72,8 @@ export function ConsoleApp() {
       onNavigate={handleNavigate}
       connected={monitor.health.connected}
       alertCount={monitor.openIncidents.length}
+      soundMuted={soundMuted}
+      onSoundMutedChange={handleSoundMutedChange}
       user={user}
       onLogout={handleLogout}
       footer={
@@ -103,6 +127,8 @@ export function ConsoleApp() {
         <NetworkAnalysisDashboard snapshot={monitor.network} {...clusterPageProps} />
       )}
 
+      {page === "profiling" && <ProfilingDashboard {...clusterPageProps} />}
+
       {page === "alerts" && (
         <AlertsDashboard
           incidents={monitor.incidents}
@@ -119,6 +145,8 @@ export function ConsoleApp() {
           namespaceFilter={namespace}
           paused={paused}
           onPausedChange={setPaused}
+          soundMuted={soundMuted}
+          onSoundMutedChange={handleSoundMutedChange}
           {...clusterPageProps}
         />
       )}
@@ -132,6 +160,8 @@ export function ConsoleApp() {
           onDisconnect={monitor.disconnect}
         />
       )}
+
+      {cloudPage}
     </AppShell>
   );
 }

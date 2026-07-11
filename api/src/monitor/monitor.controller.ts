@@ -1,5 +1,7 @@
-import { Body, Controller, Get, Inject, Param, Post } from "@nestjs/common";
+import { Body, Controller, Get, Inject, Param, Post, Query, UseGuards } from "@nestjs/common";
+import { resolveKubeContextName } from "../../../src/core/kubeconfig/resolve-context";
 import type { ConnectClusterInput } from "../../../src/core/types/monitoring";
+import { AuthGuard } from "../auth/auth.guard";
 import { MonitorService } from "./monitor.service";
 
 @Controller("monitor")
@@ -11,6 +13,13 @@ export class MonitorController {
     return { ok: true, service: "kern-api" };
   }
 
+  @UseGuards(AuthGuard)
+  @Get("context")
+  contextName() {
+    return { name: resolveKubeContextName() };
+  }
+
+  @UseGuards(AuthGuard)
   @Post("session")
   session(@Body() body: { ebpfCollectorUrl?: string }) {
     return this.monitorService.handle({
@@ -20,6 +29,7 @@ export class MonitorController {
     });
   }
 
+  @UseGuards(AuthGuard)
   @Post("connect")
   connect(@Body() body: ConnectClusterInput) {
     const proxyUrl = body.proxyUrl ?? process.env.KERN_K8S_PROXY ?? "http://127.0.0.1:8001";
@@ -37,21 +47,31 @@ export class MonitorController {
     });
   }
 
+  @UseGuards(AuthGuard)
   @Post("disconnect")
   disconnect() {
     return this.monitorService.handle({ type: "DISCONNECT" });
   }
 
+  @UseGuards(AuthGuard)
   @Get("snapshot")
   snapshot() {
     return this.monitorService.handle({ type: "GET_SNAPSHOT" });
   }
 
+  @UseGuards(AuthGuard)
+  @Get("profile")
+  profile(@Query("node") nodeName?: string) {
+    return this.monitorService.handle({ type: "GET_PROFILE", nodeName });
+  }
+
+  @UseGuards(AuthGuard)
   @Get("snapshots/history")
   snapshotHistory() {
     return this.monitorService.recentSnapshots(30);
   }
 
+  @UseGuards(AuthGuard)
   @Post("incidents/:id/resolve")
   resolveIncident(@Param("id") incidentId: string) {
     return this.monitorService.handle({ type: "RESOLVE_INCIDENT", incidentId });

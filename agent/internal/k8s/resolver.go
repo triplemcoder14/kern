@@ -25,6 +25,12 @@ type PodRef struct {
 	Namespace string
 }
 
+// PodMeta resolves Kubernetes pod identity from a pod UID.
+type PodMeta struct {
+	Name      string
+	Namespace string
+}
+
 type ServiceRef struct {
 	Name      string
 	Namespace string
@@ -33,6 +39,7 @@ type ServiceRef struct {
 type Resolver struct {
 	mu            sync.RWMutex
 	byIP          map[string]PodRef
+	byUID         map[string]PodMeta
 	serviceByIP   map[string]ServiceRef
 	podToServices map[string][]ServiceRef
 	clients       kubernetes.Interface
@@ -49,6 +56,7 @@ func NewResolver() (*Resolver, error) {
 	}
 	return &Resolver{
 		byIP:          make(map[string]PodRef),
+		byUID:         make(map[string]PodMeta),
 		serviceByIP:   make(map[string]ServiceRef),
 		podToServices: make(map[string][]ServiceRef),
 		clients:       clients,
@@ -58,6 +66,7 @@ func NewResolver() (*Resolver, error) {
 func NewNoopResolver() *Resolver {
 	return &Resolver{
 		byIP:          make(map[string]PodRef),
+		byUID:         make(map[string]PodMeta),
 		serviceByIP:   make(map[string]ServiceRef),
 		podToServices: make(map[string][]ServiceRef),
 	}
@@ -144,12 +153,15 @@ func podKey(namespace, name string) string {
 
 func (r *Resolver) indexPod(pod *corev1.Pod) {
 	ip := pod.Status.PodIP
-	if ip == "" {
-		return
-	}
+	ref := PodMeta{Name: pod.Name, Namespace: pod.Namespace}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.byIP[ip] = PodRef{Name: pod.Name, Namespace: pod.Namespace}
+	if ip != "" {
+		r.byIP[ip] = PodRef{Name: pod.Name, Namespace: pod.Namespace}
+	}
+	for _, uid := range podUIDKeys(string(pod.UID)) {
+		r.byUID[uid] = ref
+	}
 }
 
 func (r *Resolver) removePod(pod *corev1.Pod) {
@@ -159,7 +171,34 @@ func (r *Resolver) removePod(pod *corev1.Pod) {
 	if ip != "" {
 		delete(r.byIP, ip)
 	}
+	for _, uid := range podUIDKeys(string(pod.UID)) {
+		delete(r.byUID, uid)
+	}
 	delete(r.podToServices, podKey(pod.Namespace, pod.Name))
+}
+
+func podUIDKeys(uid string) []string {
+	uid = strings.ToLower(strings.TrimSpace(uid))
+	if uid == "" {
+		return nil
+	}
+	compact := strings.ReplaceAll(uid, "-", "")
+	keys := []string{uid}
+	if compact != uid {
+		keys = append(keys, compact)
+	}
+	if !strings.Contains(uid, "-") && len(compact) == 32 {
+		keys = append(keys, formatPodUID(compact))
+	}
+	return keys
+}
+
+func formatPodUID(raw string) string {
+	raw = strings.ReplaceAll(raw, "-", "")
+	if len(raw) != 32 {
+		return raw
+	}
+	return raw[0:8] + "-" + raw[8:12] + "-" + raw[12:16] + "-" + raw[16:20] + "-" + raw[20:32]
 }
 
 func (r *Resolver) indexService(service *corev1.Service) {
@@ -257,6 +296,17 @@ func (r *Resolver) Lookup(ip string) (PodRef, bool) {
 	defer r.mu.RUnlock()
 	ref, ok := r.byIP[ip]
 	return ref, ok
+}
+
+func (r *Resolver) LookupPodByUID(uid string) (PodMeta, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, key := range podUIDKeys(uid) {
+		if ref, ok := r.byUID[key]; ok {
+			return ref, true
+		}
+	}
+	return PodMeta{}, false
 }
 
 func (r *Resolver) LookupService(ip string) (ServiceRef, bool) {

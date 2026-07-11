@@ -1,5 +1,6 @@
 import type { Incident, MonitorSeverity } from "../types/monitoring";
 import type { NetworkEdge, NetworkFlow, NetworkSnapshot } from "../types/network";
+import type { DeclarativeAlertRule } from "./declarative-alert-rules";
 
 const LATENCY_WARNING_MS = 120;
 const LATENCY_CRITICAL_MS = 250;
@@ -181,6 +182,159 @@ export function evaluateFlowAlerts(
   }
 
   return alerts;
+}
+
+export function evaluateDeclarativeFlowAlerts(
+  rules: DeclarativeAlertRule[],
+  current: NetworkSnapshot,
+  previous: NetworkSnapshot | null,
+): FlowAlertCandidate[] {
+  if (rules.length === 0) {
+    return [];
+  }
+
+  const alerts: FlowAlertCandidate[] = [];
+  const seen = new Set<string>();
+
+  const push = (alert: FlowAlertCandidate) => {
+    if (seen.has(alert.ruleId)) {
+      return;
+    }
+    seen.add(alert.ruleId);
+    alerts.push(alert);
+  };
+
+  const matchesFlow = (rule: DeclarativeAlertRule, path: string | undefined, namespace: string | undefined, verdict: string) => {
+    if (rule.match?.namespace && namespace !== rule.match.namespace) {
+      return false;
+    }
+    if (rule.match?.pathContains && !(path ?? "").includes(rule.match.pathContains)) {
+      return false;
+    }
+    if (rule.match?.verdict && verdict !== rule.match.verdict) {
+      return false;
+    }
+    return true;
+  };
+
+  for (const rule of rules) {
+    const latencyThreshold = rule.threshold?.latencyMs ?? 120;
+    const spikeFactor = rule.threshold?.spikeFactor ?? 3;
+    const minPriorFlows = rule.threshold?.minPriorFlows ?? 5;
+
+    if (rule.type === "latency" || rule.type === "drop" || rule.type === "timeout") {
+      for (const flow of current.flows) {
+        const path = flowPath(flow);
+        const namespace = flow.dst.namespace ?? flow.src.namespace;
+        const verdict = flow.verdict ?? "OK";
+
+        if (!matchesFlow(rule, path, namespace, verdict)) {
+          continue;
+        }
+
+        if (rule.type === "drop" && verdict === "DROPPED") {
+          push({
+            ruleId: rule.id,
+            severity: rule.severity,
+            title: rule.title ?? "Dropped packets",
+            summary: `${flow.protocol}:${flow.port} dropped on ${path ?? "unknown path"}`,
+            cause: rule.cause ?? "Declarative CRD rule matched a dropped flow.",
+            path,
+            namespace,
+            resourceKind: flow.dst.kind,
+            resourceName: flow.dst.name,
+          });
+        }
+
+        if (rule.type === "timeout" && (verdict === "TIMEOUT" || verdict === "RETRY")) {
+          push({
+            ruleId: rule.id,
+            severity: rule.severity,
+            title: rule.title ?? "Connection timeout",
+            summary: `${flow.protocol}:${flow.port} timing out on ${path ?? "unknown path"}`,
+            cause: rule.cause ?? "Declarative CRD rule matched a timing-out flow.",
+            path,
+            namespace,
+            resourceKind: flow.dst.kind,
+            resourceName: flow.dst.name,
+          });
+        }
+
+        if (rule.type === "latency" && (flow.latencyMs ?? 0) >= latencyThreshold) {
+          push({
+            ruleId: rule.id,
+            severity: rule.severity,
+            title: rule.title ?? "High latency",
+            summary: `${flow.latencyMs}ms on ${path ?? "unknown path"} (${flow.protocol}:${flow.port})`,
+            cause: rule.cause ?? "Declarative CRD rule matched elevated latency.",
+            path,
+            namespace,
+            resourceKind: flow.dst.kind,
+            resourceName: flow.dst.name,
+          });
+        }
+      }
+    }
+
+    if (rule.type === "spike" || rule.type === "silence") {
+      for (const edge of current.topology.edges) {
+        const path = edgePath(edge, current);
+        const to = current.topology.nodes.find((node) => node.id === edge.to);
+        const namespace = to?.namespace;
+        const verdict = edge.verdict ?? "OK";
+
+        if (!matchesFlow(rule, path, namespace, verdict)) {
+          continue;
+        }
+
+        const prevEdge = previous?.topology.edges.find((item) => item.id === edge.id);
+        if (rule.type === "spike" && prevEdge && prevEdge.flowCount >= 3 && edge.flowCount >= prevEdge.flowCount * spikeFactor) {
+          push({
+            ruleId: rule.id,
+            severity: rule.severity,
+            title: rule.title ?? "Traffic spike",
+            summary: `${edge.flowCount} flows on ${edge.label} (was ${prevEdge.flowCount})`,
+            cause: rule.cause ?? "Declarative CRD rule matched a traffic spike.",
+            path,
+            namespace,
+            resourceKind: to?.kind,
+            resourceName: to?.name,
+          });
+        }
+
+        if (rule.type === "silence" && prevEdge && prevEdge.flowCount >= minPriorFlows && edge.flowCount === 0) {
+          push({
+            ruleId: rule.id,
+            severity: rule.severity,
+            title: rule.title ?? "Traffic stopped",
+            summary: `No recent flows on ${edge.label}`,
+            cause: rule.cause ?? "Declarative CRD rule matched a silent path.",
+            path,
+            namespace,
+            resourceKind: to?.kind,
+            resourceName: to?.name,
+          });
+        }
+      }
+    }
+  }
+
+  return alerts;
+}
+
+export function mergeFlowAlerts(
+  builtIn: FlowAlertCandidate[],
+  declarative: FlowAlertCandidate[],
+): FlowAlertCandidate[] {
+  const seen = new Set(builtIn.map((item) => item.ruleId));
+  const merged = [...builtIn];
+  for (const alert of declarative) {
+    if (!seen.has(alert.ruleId)) {
+      seen.add(alert.ruleId);
+      merged.push(alert);
+    }
+  }
+  return merged;
 }
 
 export function incidentFromFlowAlert(alert: FlowAlertCandidate): Incident {

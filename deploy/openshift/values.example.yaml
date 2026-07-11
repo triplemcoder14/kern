@@ -1,0 +1,21 @@
+# OpenShift overlay — agent + operator in-cluster, console on your machine.
+# Copy to a local values file (gitignored) before install:
+#
+#   mkdir -p .kern
+#   cp deploy/openshift/values.example.yaml .kern/openshift-values.yaml
+#
+# /proc mode avoids eBPF; disable sample alert rules to reduce footprint.
+
+agent:
+  mode: proc
+  imagePullPolicy: IfNotPresent
+
+operator:
+  imagePullPolicy: IfNotPresent
+
+alertRules:
+  enabled: false
+
+monitor:
+  enabled: true
+  name: default

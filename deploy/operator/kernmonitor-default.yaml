@@ -1,0 +1,11 @@
+apiVersion: kern.io/v1alpha1
+kind: KernMonitor
+metadata:
+  name: default
+spec:
+  namespace: kern
+  agent:
+    image: kern/agent:latest
+    mode: auto
+    imagePullPolicy: IfNotPresent
+    port: 9474

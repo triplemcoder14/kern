@@ -1,0 +1,58 @@
+# Default values for kern Helm chart.
+#
+# Public install (after a release is published to GHCR):
+#   helm install kern oci://ghcr.io/triplemcoder14/charts/kern --version 0.1.0 \
+#     -n kern-system --create-namespace
+#
+# From this repo (clone or Helm git URL):
+#   helm install kern ./deploy/helm/kern -n kern-system --create-namespace
+#   helm install kern https://github.com/triplemcoder14/kern.git//deploy/helm/kern?ref=v0.1.0 \
+#     -n kern-system --create-namespace
+
+global:
+  # Override both agent and operator image repos when set (e.g. local/minikube builds).
+  imageRegistry: ghcr.io/triplemcoder14
+
+operator:
+  image: ghcr.io/triplemcoder14/kern-operator:0.1.2
+  imagePullPolicy: IfNotPresent
+  replicas: 1
+  namespace: kern-system
+  agentNamespace: kern
+
+agent:
+  image: ghcr.io/triplemcoder14/kern-agent:0.1.2
+  imagePullPolicy: IfNotPresent
+  mode: auto
+  port: 9474
+
+monitor:
+  # Cluster-scoped KernMonitor CR applied by the chart
+  enabled: true
+  name: default
+
+alertRules:
+  # Sample KernAlertRule CRs (synced to ConfigMap kern/kern-alert-rules)
+  enabled: true
+  samples:
+    - name: prod-latency-warning
+      namespace: kern
+      type: latency
+      severity: warning
+      threshold:
+        latencyMs: 150
+      match:
+        namespace: default
+      title: Production path latency elevated
+      cause: Helm-managed CRD rule — inspect downstream pods and node saturation.
+    - name: prod-drop-critical
+      namespace: kern
+      type: drop
+      severity: critical
+      match:
+        pathContains: backend
+      title: Backend path dropping packets
+      cause: Helm-managed CRD rule — check NetworkPolicy and CNI drops.
+
+crds:
+  install: true

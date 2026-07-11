@@ -20,7 +20,7 @@ Bootstraps KERN for local development:
   - agent port-forward on :${AGENT_PORT}
   - UI + API via npm run dev
 
-Then open http://localhost:5173 → sign in → Settings → Connect.
+Then open http://localhost:5173/login → sign in → Settings → Connect.
 
 Options:
   --quick         Skip agent deploy when kern-agent is already Running
@@ -172,17 +172,20 @@ print_banner() {
   cat <<EOF
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  KERN is ready — connect your cluster in the UI
+  KERN is ready — self-hosted observability
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  UI:      http://localhost:5173
-  API:     http://127.0.0.1:3000/api
-  Agent:   http://127.0.0.1:${AGENT_PORT}
+  Console:  http://localhost:5173/login
+  API:      http://127.0.0.1:3000/api
+  Agent:    http://127.0.0.1:${AGENT_PORT}
 
-  1. Sign up (GitHub) or sign in (Google) on the landing page
-  2. Open Settings → Connect
-  3. Agent URL defaults to http://127.0.0.1:${AGENT_PORT}
-  4. K8s proxy is server-side at http://127.0.0.1:${KUBECTL_PROXY_PORT}
+  Console login:
+    username: ${KERN_USERNAME}
+    password: ${KERN_PASSWORD}
+
+  1. Sign in at /login
+  2. Open Settings → Connect (agent URL defaults to http://127.0.0.1:${AGENT_PORT})
+  3. K8s proxy is server-side at http://127.0.0.1:${KUBECTL_PROXY_PORT}
 
   Ctrl+C stops UI + API only.
   Background proxy/port-forward: ./scripts/stop-kern.sh
@@ -193,6 +196,10 @@ EOF
 }
 
 mkdir -p "$STATE_DIR"
+
+export KERN_USERNAME="${KERN_USERNAME:-admin}"
+export KERN_PASSWORD="${KERN_PASSWORD:-change-me-on-install}"
+export KERN_AUTH_SECRET="${KERN_AUTH_SECRET:-kern-dev-auth-secret-change-me}"
 
 echo ""
 echo "KERN — local setup"
@@ -207,5 +214,4 @@ start_agent_port_forward
 print_banner
 
 cd "$ROOT"
-export KERN_AUTH_DEV="${KERN_AUTH_DEV:-1}"
 exec npm run dev

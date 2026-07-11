@@ -12,6 +12,8 @@ import type {
   MonitorWorkerRequest,
   MonitorWorkerToMain,
 } from "../../../src/core/types/monitor-rpc";
+import { AuthService } from "../auth/auth.service";
+import { readSessionToken } from "../auth/session";
 import { MonitorService } from "./monitor.service";
 
 @WebSocketGateway({
@@ -25,9 +27,24 @@ export class MonitorGateway implements OnGatewayConnection {
   @WebSocketServer()
   server!: Server;
 
-  constructor(@Inject(MonitorService) private readonly monitorService: MonitorService) {}
+  constructor(
+    @Inject(MonitorService) private readonly monitorService: MonitorService,
+    @Inject(AuthService) private readonly authService: AuthService,
+  ) {}
 
-  handleConnection(client: Socket): void {
+  async handleConnection(client: Socket): Promise<void> {
+    const session = readSessionToken(client.handshake.headers.cookie);
+    if (!session) {
+      client.disconnect(true);
+      return;
+    }
+
+    const user = await this.authService.resolveSessionUser(session);
+    if (!user) {
+      client.disconnect(true);
+      return;
+    }
+
     const unsubscribe = this.monitorService.onEvent((event) => {
       client.emit("monitor", { type: "event", event } satisfies MonitorWorkerToMain);
     });

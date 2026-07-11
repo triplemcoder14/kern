@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kern/agent/internal/k8s"
+	"github.com/kern/agent/internal/profile"
 	"github.com/kern/agent/internal/store"
 	"github.com/kern/agent/internal/trace"
 )
@@ -14,13 +15,31 @@ import (
 const AgentVersion = "0.6.0"
 
 type Server struct {
-	flows    *store.FlowStore
-	tracer   trace.Tracer
+	flows     *store.FlowStore
+	tracer    trace.Tracer
+	resolver  *k8s.Resolver
+	profile   profile.Collector
+}
+
+type profilePodLookup struct {
 	resolver *k8s.Resolver
 }
 
+func (p profilePodLookup) LookupPodByUID(uid string) (namespace, name string, ok bool) {
+	ref, ok := p.resolver.LookupPodByUID(uid)
+	if !ok {
+		return "", "", false
+	}
+	return ref.Namespace, ref.Name, true
+}
+
 func NewServer(flows *store.FlowStore, tracer trace.Tracer, resolver *k8s.Resolver) *Server {
-	return &Server{flows: flows, tracer: tracer, resolver: resolver}
+	return &Server{
+		flows:    flows,
+		tracer:   tracer,
+		resolver: resolver,
+		profile:  profile.NewCollector(profilePodLookup{resolver: resolver}),
+	}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -29,6 +48,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/agent", s.handleAgentInfo)
 	mux.HandleFunc("/api/v1/flows", s.handleFlows)
 	mux.HandleFunc("/api/v1/flows/stream", s.handleFlowStream)
+	mux.HandleFunc("/api/v1/profile", s.handleProfile)
 	return withCORS(mux)
 }
 
@@ -67,7 +87,22 @@ func (s *Server) handleAgentInfo(w http.ResponseWriter, r *http.Request) {
 			"flows":        "/api/v1/flows",
 			"flow_stream":  "/api/v1/flows/stream",
 			"agent_info":   "/api/v1/agent",
+			"profile":      "/api/v1/profile",
 		},
+	})
+}
+
+func (s *Server) handleProfile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	snapshot := s.profile.Snapshot(s.flows)
+	writeJSON(w, map[string]interface{}{
+		"agent":   "kern-agent",
+		"version": AgentVersion,
+		"profile": snapshot,
 	})
 }
 

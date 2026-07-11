@@ -1,24 +1,29 @@
 import { useState, type ReactElement, type ReactNode, type SVGProps } from "react";
 import type { AuthUser } from "../../lib/auth-api";
+import { getCloudNav, type CloudNavItem } from "@kern/platform";
 import { KernWordmark } from "./KernWordmark";
 
-export type NavPage =
+export type CoreNavPage =
   | "overview"
   | "topology"
   | "flows"
   | "workloads"
   | "network"
+  | "profiling"
   | "alerts"
   | "events"
   | "settings";
 
-export type NavId = NavPage;
+export type NavPage = CoreNavPage | string;
+export type NavId = CoreNavPage | string;
 
 interface AppShellProps {
   activeNav: NavId;
   onNavigate: (nav: NavId, page: NavPage) => void;
   connected: boolean;
   alertCount: number;
+  soundMuted?: boolean;
+  onSoundMutedChange?: (muted: boolean) => void;
   user?: AuthUser | null;
   onLogout?: () => Promise<void>;
   children: ReactNode;
@@ -30,6 +35,15 @@ interface NavItem {
   page: NavPage;
   label: string;
   Icon: (props: SVGProps<SVGSVGElement>) => ReactElement;
+}
+
+function cloudNavToItem(item: CloudNavItem): NavItem {
+  return {
+    id: item.id,
+    page: item.page,
+    label: item.label,
+    Icon: item.Icon as NavItem["Icon"],
+  };
 }
 
 function IconOverview(props: SVGProps<SVGSVGElement>) {
@@ -107,6 +121,25 @@ function IconEvents(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+function IconSound(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden {...props}>
+      <path
+        d="M4 8.5h2.5L9 5.5v9L6.5 11.5H4a1 1 0 0 1-1-1v-1a1 1 0 0 1 1-1Z"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M11.5 7.5a4 4 0 0 1 0 5M13.5 5.5a7 7 0 0 1 0 9"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 function IconLogout(props: SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 20 20" fill="none" aria-hidden {...props}>
@@ -123,6 +156,15 @@ function IconLogout(props: SVGProps<SVGSVGElement>) {
         strokeLinecap="round"
         strokeLinejoin="round"
       />
+    </svg>
+  );
+}
+
+function IconProfiling(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden {...props}>
+      <path d="M4 15V8l3 4 2-3 3 6 4-8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+      <rect x="3" y="3" width="14" height="14" rx="2" stroke="currentColor" strokeWidth="1.4" />
     </svg>
   );
 }
@@ -147,6 +189,7 @@ const PRIMARY_NAV: NavItem[] = [
   { id: "flows", page: "flows", label: "Flows", Icon: IconFlows },
   { id: "workloads", page: "workloads", label: "Workloads", Icon: IconWorkloads },
   { id: "network", page: "network", label: "Network", Icon: IconNetwork },
+  { id: "profiling", page: "profiling", label: "Profiling", Icon: IconProfiling },
   { id: "alerts", page: "alerts", label: "Alerts", Icon: IconAlerts },
   { id: "events", page: "events", label: "Events", Icon: IconEvents },
 ];
@@ -160,6 +203,8 @@ export function AppShell({
   onNavigate,
   connected,
   alertCount,
+  soundMuted = false,
+  onSoundMutedChange,
   user,
   onLogout,
   children,
@@ -167,24 +212,26 @@ export function AppShell({
 }: AppShellProps) {
   const [collapsed, setCollapsed] = useState(false);
   const userInitial = user?.name.slice(0, 1).toUpperCase() ?? "?";
+  const cloudItems = getCloudNav();
+  const cloudNav = cloudItems.map(cloudNavToItem);
 
   const handleLogout = () => {
     if (!onLogout) {
       return;
     }
     void onLogout().then(() => {
-      window.location.href = "/";
+      window.location.href = "/login";
     });
   };
 
-  const renderNavItem = (item: NavItem) => {
+  const renderNavItem = (item: NavItem, accent?: "promo") => {
     const isActive = activeNav === item.id;
     const showBadge = item.id === "alerts" && alertCount > 0;
     return (
       <button
         key={item.id}
         type="button"
-        className={`shell-nav-item ${isActive ? "active" : ""}`}
+        className={`shell-nav-item${isActive ? " active" : ""}${accent === "promo" ? " shell-nav-item-promo" : ""}`}
         onClick={() => onNavigate(item.id, item.page)}
         title={collapsed ? item.label : undefined}
       >
@@ -215,24 +262,30 @@ export function AppShell({
         </div>
 
         <nav className="shell-nav shell-nav-primary">
-          {PRIMARY_NAV.map(renderNavItem)}
+          {PRIMARY_NAV.map((item) => renderNavItem(item))}
         </nav>
 
-        <nav className="shell-nav shell-nav-secondary">{SECONDARY_NAV.map(renderNavItem)}</nav>
+        {cloudNav.length > 0 ? (
+          <nav className="shell-nav shell-nav-cloud" aria-label="Kern K8s Runner">
+            {!collapsed ? <div className="shell-nav-section">K8s Runner</div> : null}
+            {cloudItems.map((source) => {
+              const item = cloudNav.find((entry) => entry.id === source.id);
+              return item ? renderNavItem(item, source.accent) : null;
+            })}
+          </nav>
+        ) : null}
+
+        <nav className="shell-nav shell-nav-secondary">{SECONDARY_NAV.map((item) => renderNavItem(item))}</nav>
 
         <div className="shell-sidebar-foot">
           <div className="shell-account">
-            {user?.avatarUrl ? (
-              <img src={user.avatarUrl} alt="" className="shell-user-avatar shell-user-avatar-img" />
-            ) : (
-              <div className="shell-user-avatar">{userInitial}</div>
-            )}
+            <div className="shell-user-avatar">{userInitial}</div>
 
             {!collapsed ? (
               <div className="shell-account-meta">
                 <div className="shell-user-name">{user?.name ?? "Signed in"}</div>
                 <div className="shell-account-sub">
-                  <span className="shell-user-role">{user?.provider ?? "Account"}</span>
+                  <span className="shell-user-role">{user?.username ?? "Account"}</span>
                   <span className="shell-account-sep" aria-hidden>
                     ·
                   </span>
@@ -245,6 +298,22 @@ export function AppShell({
             ) : (
               <span className={`shell-status-dot shell-account-dot ${connected ? "on" : ""}`} />
             )}
+
+            {onSoundMutedChange ? (
+              <button
+                type="button"
+                className={`shell-account-sound${soundMuted ? " muted" : " on"}`}
+                onClick={() => onSoundMutedChange(!soundMuted)}
+                aria-label={soundMuted ? "Unmute talk sounds" : "Mute talk sounds"}
+                title={
+                  soundMuted
+                    ? "Unmute live pod ↔ service talk sounds"
+                    : "Mute live pod ↔ service talk sounds"
+                }
+              >
+                <IconSound className="shell-nav-svg" />
+              </button>
+            ) : null}
 
             {onLogout ? (
               <button

@@ -1,11 +1,9 @@
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
 
 export interface AuthUser {
   id: string;
-  email: string;
+  username: string;
   name: string;
-  avatarUrl?: string;
-  provider: "github" | "google";
 }
 
 interface SessionPayload extends AuthUser {
@@ -96,10 +94,6 @@ export function sessionCookie(token: string): string {
 export function clearSessionCookie(): string {
   const secure = publicOrigin().startsWith("https://") ? "; Secure" : "";
   return `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`;
-}
-
-export function randomState(): string {
-  return randomBytes(24).toString("base64url");
 }
 
 export { publicOrigin, SESSION_COOKIE };

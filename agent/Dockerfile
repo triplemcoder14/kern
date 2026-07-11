@@ -1,4 +1,5 @@
-FROM golang:1.23-alpine AS build
+# syntax=docker/dockerfile:1
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
 WORKDIR /src
 
 ENV GOPROXY=https://proxy.golang.org,direct
@@ -7,7 +8,9 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /kern-agent .
+ARG TARGETOS=linux
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-s -w" -o /kern-agent .
 
 FROM gcr.io/distroless/static-debian12
 USER 0:0

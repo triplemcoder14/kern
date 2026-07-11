@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kern-api
+  namespace: kern-console
+  labels:
+    app: kern-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kern-api
+  template:
+    metadata:
+      labels:
+        app: kern-api
+    spec:
+      containers:
+        - name: api
+          image: ghcr.io/triplemcoder14/kern-api:0.6.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: KERN_API_PORT
+              value: "3000"
+            - name: KERN_DATA_DIR
+              value: /var/lib/kern/data
+            - name: KERN_PUBLIC_ORIGIN
+              value: http://kern-console.local
+            - name: KERN_K8S_PROXY
+              value: https://kubernetes.default.svc
+            - name: KERN_EBPF_COLLECTOR
+              value: http://kern-agent.kern.svc.cluster.local:9474
+            - name: KERN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: kern-console-auth
+                  key: KERN_USERNAME
+            - name: KERN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kern-console-auth
+                  key: KERN_PASSWORD
+            - name: KERN_AUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: kern-console-auth
+                  key: KERN_AUTH_SECRET
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/kern/data
+          readinessProbe:
+            httpGet:
+              path: /api/monitor/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: data
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kern-api
+  namespace: kern-console
+spec:
+  selector:
+    app: kern-api
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http

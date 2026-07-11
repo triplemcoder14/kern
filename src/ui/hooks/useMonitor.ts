@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MonitorWorkerEvent } from "../../core/types/monitor-rpc";
 import type {
   ClusterHealthSnapshot,
@@ -9,6 +9,7 @@ import type {
 } from "../../core/types/monitoring";
 import type { NetworkSnapshot } from "../../core/types/network";
 import { loadClusterConfig } from "../../core/config/cluster-config";
+import { trimMonitorEvents } from "../../core/monitoring/retention";
 import { getMonitorApiClient } from "../../lib/monitor-api";
 
 const EMPTY_NETWORK: NetworkSnapshot = {
@@ -20,7 +21,7 @@ const EMPTY_NETWORK: NetworkSnapshot = {
 const EMPTY_HEALTH: ClusterHealthSnapshot = {
   health: "disconnected",
   connected: false,
-  clusterName: "disconnected",
+  clusterName: "Not connected",
   podCount: 0,
   runningPods: 0,
   failedPods: 0,
@@ -28,6 +29,8 @@ const EMPTY_HEALTH: ClusterHealthSnapshot = {
   openIncidents: 0,
   eventsPerMinute: 0,
 };
+
+const EVENT_UI_BATCH_MS = 500;
 
 export function useMonitor() {
   const client = useMemo(() => getMonitorApiClient(), []);
@@ -39,6 +42,50 @@ export function useMonitor() {
   const [busy, setBusy] = useState(false);
   const [network, setNetwork] = useState<NetworkSnapshot>(EMPTY_NETWORK);
   const [namespaces, setNamespaces] = useState<string[]>([]);
+  const pendingEventsRef = useRef<MonitorEvent[]>([]);
+  const eventFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flushPendingEvents = useCallback(() => {
+    if (pendingEventsRef.current.length === 0) {
+      return;
+    }
+    const batch = pendingEventsRef.current;
+    pendingEventsRef.current = [];
+    setEvents((prev) => {
+      const merged = new Map(prev.map((item) => [item.id, item]));
+      for (const event of batch) {
+        merged.set(event.id, event);
+      }
+      return trimMonitorEvents([...merged.values()].sort((a, b) => b.timestamp.localeCompare(a.timestamp)));
+    });
+  }, []);
+
+  const queueEvent = useCallback(
+    (event: MonitorEvent) => {
+      const index = pendingEventsRef.current.findIndex((item) => item.id === event.id);
+      if (index >= 0) {
+        pendingEventsRef.current[index] = event;
+      } else {
+        pendingEventsRef.current.unshift(event);
+      }
+      if (eventFlushTimerRef.current) {
+        return;
+      }
+      eventFlushTimerRef.current = setTimeout(() => {
+        eventFlushTimerRef.current = null;
+        flushPendingEvents();
+      }, EVENT_UI_BATCH_MS);
+    },
+    [flushPendingEvents],
+  );
+
+  useEffect(() => {
+    return () => {
+      if (eventFlushTimerRef.current) {
+        clearTimeout(eventFlushTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const unsubscribe = client.onEvent((event: MonitorWorkerEvent) => {
@@ -50,12 +97,10 @@ export function useMonitor() {
           break;
         case "DISCONNECTED":
           setConnection(null);
+          setNamespaces([]);
           break;
         case "MONITOR_EVENT":
-          setEvents((prev) => {
-            const filtered = prev.filter((item) => item.id !== event.event.id);
-            return [event.event, ...filtered].slice(0, 300);
-          });
+          queueEvent(event.event);
           break;
         case "INCIDENT_UPSERTED":
           setIncidents((prev) => {
@@ -97,7 +142,7 @@ export function useMonitor() {
       .catch((err: Error) => setError(err.message));
 
     return unsubscribe;
-  }, [client]);
+  }, [client, queueEvent]);
 
   const connect = useCallback(
     async (input: ConnectClusterInput) => {
@@ -135,6 +180,18 @@ export function useMonitor() {
     [client],
   );
 
+  const setNamespace = useCallback(
+    async (namespace: string) => {
+      try {
+        await client.request({ type: "SET_NAMESPACE", namespace });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to set namespace scope";
+        setError(message);
+      }
+    },
+    [client],
+  );
+
   const openIncidents = useMemo(
     () => incidents.filter((incident) => incident.status === "open"),
     [incidents],
@@ -159,5 +216,6 @@ export function useMonitor() {
     connect,
     disconnect,
     resolveIncident,
+    setNamespace,
   };
 }

@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kern-web
+  namespace: kern-console
+  labels:
+    app: kern-web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kern-web
+  template:
+    metadata:
+      labels:
+        app: kern-web
+    spec:
+      containers:
+        - name: web
+          image: ghcr.io/triplemcoder14/kern-web:0.6.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kern-web
+  namespace: kern-console
+spec:
+  selector:
+    app: kern-web
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kern-console
+  namespace: kern-console
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "86400"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: kern-console.local
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: kern-api
+                port:
+                  number: 3000
+          - path: /monitor/ws
+            pathType: Prefix
+            backend:
+              service:
+                name: kern-api
+                port:
+                  number: 3000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: kern-web
+                port:
+                  number: 80

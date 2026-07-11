@@ -1,0 +1,15 @@
+[Unit]
+Description=KERN Console Web UI
+Documentation=https://github.com/triplemcoder14/kern/blob/main/docs/INSTALL.md
+After=network-online.target kern-api.service
+Requires=kern-api.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/mkdir -p /run/kern /var/log/kern
+ExecStart=/usr/sbin/nginx -g 'daemon off;' -c /etc/kern/nginx.conf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
