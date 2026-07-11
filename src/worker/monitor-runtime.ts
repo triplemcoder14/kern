@@ -1,4 +1,5 @@
 import { K8sApiClient } from "../core/k8s-api/client";
+import { listAgentPods } from "../core/k8s-api/agent-access";
 import { buildManualConnection, parseKubeconfig } from "../core/kubeconfig/parser";
 import {
   eventFromK8sEvent,
@@ -35,6 +36,15 @@ import type {
   MonitorEvent,
 } from "../core/types/monitoring";
 import type { MonitorPersistence } from "./persistence/port";
+import {
+  retentionPolicy,
+  trimIncidentMap,
+  trimMonitorEvents,
+} from "../core/monitoring/retention";
+import {
+  pollIntervalMs,
+  type MonitorNamespaceScope,
+} from "../core/monitoring/scope";
 import { NetworkEngine } from "./network-engine";
 import { buildProfileSnapshot, deriveNodesFromPods } from "../core/profiling/build-node-profile";
 import type { AgentProfilePayload, ProfileSnapshot } from "../core/types/profiling";
@@ -42,9 +52,8 @@ import type { NetworkSnapshot } from "../core/types/network";
 
 type EventHandler = (event: MonitorWorkerEvent) => void;
 
-const MAX_EVENTS = 300;
-const POLL_INTERVAL_MS = 15_000;
-const EVENT_POLL_INTERVAL_MS = 3_000;
+const SCOPED_POD_POLL_MS = 15_000;
+const ALL_NAMESPACES_POD_POLL_MS = 30_000;
 const HEALTH_EMIT_MIN_MS = 2_000;
 const NETWORK_EMIT_MIN_MS = 4_000;
 const SNAPSHOT_PERSIST_MIN_MS = 30_000;
@@ -53,8 +62,17 @@ const DEFAULT_EBPF_URL = "http://127.0.0.1:9474";
 const DEFAULT_K8S_PROXY = "http://127.0.0.1:8001";
 const DEFAULT_ALERT_RULES_NAMESPACE = "kern";
 const DEFAULT_ALERT_RULES_CONFIGMAP = "kern-alert-rules";
-const AGENT_PROFILE_TIMEOUT_MS = 5_000;
-const DEFAULT_AGENT_NAMESPACE = "kern";
+const AGENT_PROFILE_TIMEOUT_MS = 12_000;
+
+function nodeNamesMatch(a?: string, b?: string): boolean {
+  if (!a?.trim() || !b?.trim()) {
+    return false;
+  }
+  if (a === b) {
+    return true;
+  }
+  return a.split(".")[0] === b.split(".")[0];
+}
 
 function resolveProxyUrl(proxyUrl?: string): string {
   if (proxyUrl?.startsWith("http")) {
@@ -95,8 +113,8 @@ export class MonitorRuntime {
   private incidents = new Map<string, Incident>();
   private watchAbort: AbortController | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
-  private eventPollTimer: ReturnType<typeof setInterval> | null = null;
   private connected = false;
+  private activeNamespace: MonitorNamespaceScope = "default";
   private eventTimestamps: number[] = [];
   private knownNamespaces: string[] = [];
   private networkEngine = new NetworkEngine();
@@ -140,6 +158,8 @@ export class MonitorRuntime {
           }
         }
         return this.tryReconnectSaved();
+      case "SET_NAMESPACE":
+        return this.setNamespace(request.namespace);
       case "CONNECT":
         return this.connect(request.input);
       case "DISCONNECT":
@@ -149,6 +169,11 @@ export class MonitorRuntime {
       case "GET_PROFILE":
         return this.getProfile(request.nodeName);
       case "SUBSCRIBE":
+        if (this.knownNamespaces.length > 0) {
+          this.emit({ type: "NAMESPACES_UPDATE", namespaces: this.knownNamespaces });
+        } else if (this.connected && this.client) {
+          void this.refreshNamespaces();
+        }
         this.emit({
           type: "MONITOR_SNAPSHOT",
           events: this.events,
@@ -164,7 +189,7 @@ export class MonitorRuntime {
   }
 
   async bootstrap(): Promise<void> {
-    const savedEvents = await this.persistence.loadRecentEvents(MAX_EVENTS);
+    const savedEvents = await this.persistence.loadRecentEvents(retentionPolicy().maxEvents);
     const savedIncidents = await this.persistence.loadOpenIncidents();
     this.events = savedEvents;
     for (const incident of savedIncidents) {
@@ -179,7 +204,7 @@ export class MonitorRuntime {
     }
 
     const saved = await this.persistence.loadConnectionConfig();
-    if (!saved || !this.pageOrigin) {
+    if (!saved?.name?.trim() || !this.pageOrigin) {
       return { reconnected: false };
     }
 
@@ -200,33 +225,43 @@ export class MonitorRuntime {
   private async connect(input: ConnectClusterInput): Promise<ConnectClusterResult> {
     this.stopWatchers();
 
+    const displayName = input.clusterName?.trim();
+    if (!displayName) {
+      throw new Error("Enter a cluster name in Settings before connecting.");
+    }
+
     const proxyUrl = resolveProxyUrl(input.proxyUrl);
     const origin = resolveOrigin(input.origin, this.pageOrigin);
-    const clusterName = input.clusterName ?? "minikube";
     const ebpfCollectorUrl = resolveEbpfUrl(input.ebpfCollectorUrl);
 
     if (input.kubeconfig?.trim()) {
       const parsed = parseKubeconfig(input.kubeconfig, proxyUrl, origin);
       this.config = {
         ...parsed,
-        name: clusterName || parsed.name,
+        name: displayName,
         token: input.token ?? parsed.token,
         ebpfCollectorUrl,
       };
     } else {
       this.config = {
-        ...buildManualConnection(proxyUrl, input.token, clusterName, origin),
+        ...buildManualConnection(proxyUrl, input.token, displayName, origin),
         ebpfCollectorUrl,
       };
     }
 
     this.client = new K8sApiClient(this.config);
     await this.client.ping();
+    await this.refreshNamespaces();
+
     await this.refreshAlertRules();
 
     this.connected = true;
 
     this.networkEngine.configure(ebpfCollectorUrl, origin);
+    this.networkEngine.setScope(this.activeNamespace);
+    this.networkEngine.onRefreshError((message) => {
+      this.emit({ type: "ERROR", message });
+    });
     this.networkEngine.onUpdate((snapshot) => {
       this.pendingNetworkSnapshot = snapshot;
       if (this.networkEmitTimer) {
@@ -280,7 +315,9 @@ export class MonitorRuntime {
     this.connected = false;
     this.config = null;
     this.client = null;
+    this.knownNamespaces = [];
     await this.persistence.clearConnectionConfig();
+    this.emit({ type: "NAMESPACES_UPDATE", namespaces: [] });
     this.emit({ type: "DISCONNECTED" });
     this.emitHealth();
     return { disconnected: true };
@@ -322,8 +359,8 @@ export class MonitorRuntime {
     }
 
     const [eventList, pods] = await Promise.all([
-      this.client.listEvents(),
-      this.client.listPods(),
+      this.client.listEvents(this.activeNamespace),
+      this.client.listPods(this.activeNamespace),
     ]);
 
     const sorted = eventList.items
@@ -351,59 +388,52 @@ export class MonitorRuntime {
     });
   }
 
-  private eventChanged(existing: MonitorEvent, incoming: MonitorEvent): boolean {
-    return (
-      existing.timestamp !== incoming.timestamp ||
-      existing.message !== incoming.message ||
-      existing.title !== incoming.title ||
-      existing.severity !== incoming.severity
-    );
-  }
-
-  private async syncEventsFromList(items: MonitorEvent[]): Promise<number> {
-    let ingested = 0;
-
-    for (const event of items) {
-      const existing = this.events.find((item) => item.id === event.id);
-      if (!existing) {
-        await this.ingestEvent(event);
-        ingested += 1;
-        continue;
-      }
-      if (this.eventChanged(existing, event)) {
-        await this.ingestEvent(event);
-        ingested += 1;
-      }
+  private setNamespace(namespace: string): { namespace: string } {
+    const next = namespace.trim() || "default";
+    if (next === this.activeNamespace) {
+      return { namespace: next };
     }
-
-    return ingested;
+    this.activeNamespace = next;
+    this.networkEngine.setScope(next);
+    if (next !== "all") {
+      this.events = this.events.filter(
+        (event) => !event.namespace || event.namespace === next,
+      );
+    }
+    if (this.connected && this.client) {
+      this.restartWatchersForScope();
+      void this.seedFromCluster().catch((error) => {
+        const message = error instanceof Error ? error.message : "Failed to reload namespace scope";
+        this.emit({ type: "ERROR", message });
+      });
+    }
+    return { namespace: next };
   }
 
-  private async pollEvents(): Promise<void> {
-    if (!this.client) {
+  private podPollIntervalMs(): number {
+    return pollIntervalMs(this.activeNamespace, SCOPED_POD_POLL_MS, ALL_NAMESPACES_POD_POLL_MS);
+  }
+
+  private restartPodPollTimer(): void {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+    if (!this.connected || !this.client) {
       return;
     }
+    this.pollTimer = setInterval(() => {
+      void this.pollPodHealth();
+      void this.refreshAlertRules();
+      void this.refreshNamespaces();
+    }, this.podPollIntervalMs());
+  }
 
-    try {
-      const { items } = await this.client.listEvents();
-      const mapped = items
-        .map(eventFromK8sEvent)
-        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-
-      const ingested = await this.syncEventsFromList(mapped);
-      await this.refreshNamespaces();
-
-      if (ingested > 0) {
-        this.emit({
-          type: "MONITOR_SNAPSHOT",
-          events: this.events,
-          incidents: [...this.incidents.values()],
-        });
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Event poll failed";
-      this.emit({ type: "ERROR", message });
-    }
+  private restartWatchersForScope(): void {
+    this.watchAbort?.abort();
+    this.watchAbort = null;
+    void this.runEventWatch();
+    this.restartPodPollTimer();
   }
 
   private async refreshNamespaces(): Promise<void> {
@@ -431,8 +461,8 @@ export class MonitorRuntime {
       this.events[existingIndex] = event;
     } else {
       this.events.unshift(event);
-      this.events = this.events.slice(0, MAX_EVENTS);
     }
+    this.events = trimMonitorEvents(this.events);
   }
 
   private async refreshAlertRules(): Promise<void> {
@@ -457,25 +487,12 @@ export class MonitorRuntime {
     }
 
     void this.runEventWatch();
-    void this.pollEvents();
-
-    this.eventPollTimer = setInterval(() => {
-      void this.pollEvents();
-    }, EVENT_POLL_INTERVAL_MS);
-
-    this.pollTimer = setInterval(() => {
-      void this.pollPodHealth();
-      void this.refreshAlertRules();
-    }, POLL_INTERVAL_MS);
+    this.restartPodPollTimer();
   }
 
   private stopWatchers(): void {
     this.watchAbort?.abort();
     this.watchAbort = null;
-    if (this.eventPollTimer) {
-      clearInterval(this.eventPollTimer);
-      this.eventPollTimer = null;
-    }
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
@@ -500,7 +517,7 @@ export class MonitorRuntime {
     this.watchAbort = new AbortController();
 
     try {
-      const { resourceVersion } = await this.client.listEvents();
+      const { resourceVersion } = await this.client.listEvents(this.activeNamespace);
 
       await this.client.watchEvents(
         resourceVersion,
@@ -508,6 +525,7 @@ export class MonitorRuntime {
           void this.ingestEvent(eventFromK8sEvent(event));
         },
         this.watchAbort.signal,
+        this.activeNamespace,
       );
     } catch (error) {
       if (this.watchAbort?.signal.aborted) {
@@ -532,7 +550,7 @@ export class MonitorRuntime {
     }
 
     try {
-      const pods = await this.client.listPods();
+      const pods = await this.client.listPods(this.activeNamespace);
       for (const pod of pods) {
         const failure = eventFromPodFailure(pod);
         if (failure) {
@@ -594,6 +612,7 @@ export class MonitorRuntime {
     this.incidents.set(incident.id, incident);
     this.persistLater(() => this.persistence.saveIncident(incident));
     this.emit({ type: "INCIDENT_UPSERTED", incident });
+    trimIncidentMap(this.incidents);
   }
 
   private async onNetworkSnapshot(snapshot: NetworkSnapshot): Promise<void> {
@@ -644,6 +663,7 @@ export class MonitorRuntime {
         this.emit({ type: "INCIDENT_RESOLVED", incidentId: id });
       }
     }
+    trimIncidentMap(this.incidents);
   }
 
   private buildHealthSnapshot(): ClusterHealthSnapshot {
@@ -669,7 +689,7 @@ export class MonitorRuntime {
     return {
       health,
       connected: this.connected,
-      clusterName: this.connected ? (this.config?.name?.trim() || "minikube") : "Not connected",
+      clusterName: this.connected ? this.config?.name?.trim() || "Connected" : "Not connected",
       podCount: podNodes.length,
       runningPods: podNodes.filter((node) => node.status === "healthy").length,
       failedPods: podNodes.filter((node) => node.status === "degraded").length,
@@ -735,6 +755,7 @@ export class MonitorRuntime {
         podName,
         port,
         "/api/v1/profile",
+        AGENT_PROFILE_TIMEOUT_MS,
       );
       if (!response.ok) {
         return null;
@@ -746,31 +767,45 @@ export class MonitorRuntime {
     }
   }
 
-  private async fetchAllAgentProfiles(): Promise<Map<string, AgentProfilePayload>> {
+  private async fetchAgentProfilesForNode(nodeName: string): Promise<Map<string, AgentProfilePayload>> {
     const profiles = new Map<string, AgentProfilePayload>();
     const baseUrl = resolveEbpfUrl(this.config?.ebpfCollectorUrl);
     const port = parseAgentPort(baseUrl);
-    const namespace = DEFAULT_AGENT_NAMESPACE;
+
+    const storeProfile = (profile: AgentProfilePayload) => {
+      if (!profile.node_name) {
+        return;
+      }
+      profiles.set(profile.node_name, profile);
+      const short = profile.node_name.split(".")[0];
+      if (short && short !== profile.node_name) {
+        profiles.set(short, profile);
+      }
+    };
 
     if (this.client) {
       try {
-        const agentPods = await this.client.listLabeledPods(namespace, "app=kern-agent");
-        await Promise.all(
-          agentPods.map(async (pod) => {
-            const profile = await this.fetchAgentProfileViaPodProxy(namespace, pod.name, port);
-            if (profile?.node_name) {
-              profiles.set(profile.node_name, profile);
-            }
-          }),
-        );
+        const agentPods = await listAgentPods(this.client);
+        const agentPod = agentPods.find((pod) => nodeNamesMatch(pod.nodeName, nodeName));
+        if (agentPod) {
+          const profile = await this.fetchAgentProfileViaPodProxy(
+            agentPod.namespace,
+            agentPod.name,
+            port,
+          );
+          if (profile) {
+            storeProfile(profile);
+            return profiles;
+          }
+        }
       } catch {
         // Fall back to direct agent URL below.
       }
     }
 
     const primary = await this.fetchAgentProfileFromUrl(baseUrl);
-    if (primary?.node_name && !profiles.has(primary.node_name)) {
-      profiles.set(primary.node_name, primary);
+    if (primary && nodeNamesMatch(primary.node_name, nodeName)) {
+      storeProfile(primary);
     }
 
     return profiles;
@@ -784,21 +819,34 @@ export class MonitorRuntime {
       };
     }
 
-    const pods = await this.client.listPodsOnNodes().catch(() => []);
-    let nodes: Awaited<ReturnType<K8sApiClient["listNodes"]>> = [];
-    try {
-      nodes = await this.client.listNodes();
-    } catch {
-      nodes = [];
+    const selectedNode = nodeName?.trim();
+    const nodeMetrics = await this.client.listNodeMetrics().catch(() => new Map());
+
+    if (!selectedNode) {
+      const nodes = await this.client.listNodes().catch(() => []);
+      return buildProfileSnapshot({
+        nodes,
+        pods: [],
+        network: this.networkEngine.getSnapshot(),
+        events: this.events,
+        agentProfiles: new Map(),
+        nodeMetrics,
+        podMetrics: [],
+        namespaceScope: this.activeNamespace,
+      });
     }
+
+    const [nodesResult, pods, agentProfiles, podMetrics] = await Promise.all([
+      this.client.listNodes().catch(() => []),
+      this.client.listPodsOnNode(selectedNode, this.activeNamespace).catch(() => []),
+      this.fetchAgentProfilesForNode(selectedNode),
+      this.client.listPodMetrics(this.activeNamespace).catch(() => []),
+    ]);
+
+    let nodes = nodesResult;
     if (nodes.length === 0) {
       nodes = deriveNodesFromPods(pods);
     }
-
-    const [agentProfiles, nodeMetrics] = await Promise.all([
-      this.fetchAllAgentProfiles(),
-      this.client.listNodeMetrics().catch(() => new Map()),
-    ]);
 
     return buildProfileSnapshot({
       nodes,
@@ -807,7 +855,9 @@ export class MonitorRuntime {
       events: this.events,
       agentProfiles,
       nodeMetrics,
-      selectedNode: nodeName,
+      podMetrics,
+      namespaceScope: this.activeNamespace,
+      selectedNode,
     });
   }
 }
