@@ -1,3 +1,7 @@
+import type { K8sApiClient } from "../k8s-api/client";
+import {
+  fetchAgentViaPodProxy,
+} from "../k8s-api/agent-access";
 import type { EbpfCollectorStatus, EbpfFlowPayload, NetworkFlow } from "../types/network";
 import { resolveEndpoint } from "./topology";
 import type { NetworkTopology } from "../types/network";
@@ -32,10 +36,50 @@ export class EbpfCollectorClient {
     return roots;
   }
 
-  async status(): Promise<EbpfCollectorStatus> {
+  private async fetchAgentJson<T>(
+    path: string,
+    k8s: K8sApiClient | null,
+    timeoutMs: number,
+  ): Promise<{ body: T; source: string } | null> {
+    for (const root of this.candidateRoots()) {
+      if (!root.startsWith("http")) {
+        continue;
+      }
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        const response = await fetch(this.resolveUrl(path, root), {
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+        if (response.ok) {
+          return { body: (await response.json()) as T, source: root };
+        }
+      } catch {
+        // try next direct URL
+      }
+    }
+
+    if (k8s) {
+      const proxied = await fetchAgentViaPodProxy(k8s, path, { timeoutMs });
+      if (proxied) {
+        return {
+          body: (await proxied.response.json()) as T,
+          source: `${proxied.pod.namespace}/${proxied.pod.name}`,
+        };
+      }
+    }
+
+    return null;
+  }
+
+  async status(k8s: K8sApiClient | null = null): Promise<EbpfCollectorStatus> {
     let lastError = "Collector unreachable";
 
     for (const root of this.candidateRoots()) {
+      if (!root.startsWith("http")) {
+        continue;
+      }
       try {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 4000);
@@ -78,32 +122,55 @@ export class EbpfCollectorClient {
       }
     }
 
+    if (k8s) {
+      try {
+        const proxied = await fetchAgentViaPodProxy(k8s, "/health", { timeoutMs: 6_000 });
+        if (proxied) {
+          const body = (await proxied.response.json()) as {
+            programs?: number;
+            flows_per_second?: number;
+            mode?: string;
+            message?: string;
+            pods_indexed?: number;
+            services_indexed?: number;
+          };
+          const via = `${proxied.pod.namespace}/${proxied.pod.name}`;
+          return {
+            connected: true,
+            collectorUrl: via,
+            mode: body.mode,
+            programsAttached: body.programs,
+            flowsPerSecond: body.flows_per_second,
+            podsIndexed: body.pods_indexed,
+            servicesIndexed: body.services_indexed,
+            message: formatModeMessage(body.mode, body.message ?? `agent live via ${via}`),
+          };
+        }
+      } catch (error) {
+        lastError =
+          error instanceof Error ? error.message : "Failed to reach agent via pod proxy";
+      }
+    }
+
     return {
       connected: false,
       collectorUrl: this.collectorUrl,
-      message: `${lastError} — run ./scripts/port-forward-agent.sh`,
+      message: `${lastError} — run ./scripts/port-forward-agent.sh or ensure kubectl proxy is running`,
     };
   }
 
-  async fetchFlows(topology: NetworkTopology): Promise<NetworkFlow[]> {
-    for (const root of this.candidateRoots()) {
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 5000);
-        const response = await fetch(this.resolveUrl("/api/v1/flows", root), {
-          signal: controller.signal,
-        });
-        clearTimeout(timeout);
-        if (!response.ok) {
-          continue;
-        }
-        const body = (await response.json()) as { flows?: EbpfFlowPayload[] };
-        return (body.flows ?? []).map((flow, index) => this.toNetworkFlow(flow, topology, index));
-      } catch {
-        // try next candidate
-      }
+  async fetchFlows(topology: NetworkTopology, k8s: K8sApiClient | null = null): Promise<NetworkFlow[]> {
+    const payload = await this.fetchAgentJson<{ flows?: EbpfFlowPayload[] }>(
+      "/api/v1/flows",
+      k8s,
+      5000,
+    );
+    if (!payload) {
+      return [];
     }
-    return [];
+    return (payload.body.flows ?? []).map((flow, index) =>
+      this.toNetworkFlow(flow, topology, index),
+    );
   }
 
   private toNetworkFlow(
