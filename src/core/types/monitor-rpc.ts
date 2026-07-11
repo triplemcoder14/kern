@@ -10,6 +10,7 @@ import type {
 
 export type MonitorWorkerRequest =
   | { type: "SET_ORIGIN"; origin: string; ebpfCollectorUrl?: string }
+  | { type: "SET_NAMESPACE"; namespace: string }
   | { type: "CONNECT"; input: ConnectClusterInput }
   | { type: "DISCONNECT" }
   | { type: "GET_SNAPSHOT" }

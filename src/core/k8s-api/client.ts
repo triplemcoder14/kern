@@ -1,4 +1,5 @@
 import type { ClusterConnectionConfig } from "../types/monitoring";
+import { ALL_NAMESPACES, resolveK8sNamespace, type MonitorNamespaceScope } from "../monitoring/scope";
 
 interface ListMeta {
   resourceVersion?: string;
@@ -124,6 +125,23 @@ export interface K8sNodeResourceMetrics {
   memoryUsedKi?: number;
 }
 
+const DEFAULT_FETCH_TIMEOUT_MS = 10_000;
+const LIST_FETCH_TIMEOUT_MS = (() => {
+  const raw = typeof process !== "undefined" ? process.env.KERN_K8S_LIST_TIMEOUT_MS : undefined;
+  if (!raw?.trim()) {
+    return 30_000;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 30_000;
+})();
+
+export interface K8sPodMetricSummary {
+  namespace: string;
+  name: string;
+  cpuUsageNano?: number;
+  memoryUsedKi?: number;
+}
+
 export class K8sApiClient {
   private config: ClusterConnectionConfig;
 
@@ -154,9 +172,13 @@ export class K8sApiClient {
     return `${origin}${base}${path}`;
   }
 
-  private async fetchWithTimeout(path: string, init: RequestInit = {}): Promise<Response> {
+  private async fetchWithTimeout(
+    path: string,
+    init: RequestInit = {},
+    timeoutMs = DEFAULT_FETCH_TIMEOUT_MS,
+  ): Promise<Response> {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10_000);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
       return await fetch(this.url(path), {
         ...init,
@@ -196,8 +218,66 @@ export class K8sApiClient {
     return { version: body.gitVersion ?? "unknown" };
   }
 
-  async listEvents(): Promise<K8sEventList> {
-    const response = await this.fetchWithTimeout("/api/v1/events");
+  /** Detect a human-readable cluster name from the live API (works when kubeconfig context is wrong). */
+  async detectClusterDisplayName(): Promise<string | null> {
+    try {
+      const response = await this.fetchWithTimeout(
+        "/apis/config.openshift.io/v1/infrastructures/cluster",
+        {},
+        DEFAULT_FETCH_TIMEOUT_MS,
+      );
+      if (response.ok) {
+        const body = (await response.json()) as {
+          status?: { infrastructureName?: string; apiServerURL?: string };
+        };
+        const infra = body.status?.infrastructureName?.trim();
+        if (infra) {
+          return infra;
+        }
+        const apiUrl = body.status?.apiServerURL?.trim();
+        if (apiUrl) {
+          try {
+            const host = new URL(apiUrl).hostname;
+            if (host && !host.includes("127.0.0.1")) {
+              return host.replace(/^api\./, "");
+            }
+          } catch {
+            // ignore parse errors
+          }
+        }
+      }
+    } catch {
+      // not OpenShift or API unavailable
+    }
+
+    try {
+      const nodes = await this.listNodes();
+      if (nodes.length > 0) {
+        const first = nodes[0]?.name ?? "";
+        const parts = first.split(".");
+        if (parts.length >= 3) {
+          return parts.slice(-3).join(".");
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    return null;
+  }
+
+  private namespacePath(namespace?: MonitorNamespaceScope): string {
+    const scoped = resolveK8sNamespace(namespace ?? ALL_NAMESPACES);
+    return scoped ? `/namespaces/${encodeURIComponent(scoped)}` : "";
+  }
+
+  async listEvents(namespace?: MonitorNamespaceScope): Promise<K8sEventList> {
+    const nsPath = this.namespacePath(namespace);
+    const response = await this.fetchWithTimeout(
+      `/api/v1${nsPath}/events?limit=500`,
+      {},
+      LIST_FETCH_TIMEOUT_MS,
+    );
     if (!response.ok) {
       throw new Error(`Failed to list events (${response.status})`);
     }
@@ -209,7 +289,24 @@ export class K8sApiClient {
   }
 
   async listNamespaces(): Promise<string[]> {
-    const response = await this.fetchWithTimeout("/api/v1/namespaces");
+    try {
+      const namespaces = await this.fetchNamespaceNames("/api/v1/namespaces");
+      if (namespaces.length > 0) {
+        return namespaces;
+      }
+    } catch {
+      // fall through to OpenShift projects
+    }
+
+    try {
+      return await this.fetchNamespaceNames("/apis/project.openshift.io/v1/projects");
+    } catch {
+      return [];
+    }
+  }
+
+  private async fetchNamespaceNames(path: string): Promise<string[]> {
+    const response = await this.fetchWithTimeout(path, {}, LIST_FETCH_TIMEOUT_MS);
     if (!response.ok) {
       throw new Error(`Failed to list namespaces (${response.status})`);
     }
@@ -234,8 +331,9 @@ export class K8sApiClient {
     return body.data ?? {};
   }
 
-  async listPods(): Promise<K8sPodObject[]> {
-    const response = await this.fetchWithTimeout("/api/v1/pods");
+  async listPods(namespace?: MonitorNamespaceScope): Promise<K8sPodObject[]> {
+    const nsPath = this.namespacePath(namespace);
+    const response = await this.fetchWithTimeout(`/api/v1${nsPath}/pods`, {}, LIST_FETCH_TIMEOUT_MS);
     if (!response.ok) {
       throw new Error(`Failed to list pods (${response.status})`);
     }
@@ -243,8 +341,13 @@ export class K8sApiClient {
     return body.items ?? [];
   }
 
-  async listServices(): Promise<K8sServiceObject[]> {
-    const response = await this.fetchWithTimeout("/api/v1/services");
+  async listServices(namespace?: MonitorNamespaceScope): Promise<K8sServiceObject[]> {
+    const nsPath = this.namespacePath(namespace);
+    const response = await this.fetchWithTimeout(
+      `/api/v1${nsPath}/services`,
+      {},
+      LIST_FETCH_TIMEOUT_MS,
+    );
     if (!response.ok) {
       throw new Error(`Failed to list services (${response.status})`);
     }
@@ -252,8 +355,13 @@ export class K8sApiClient {
     return body.items ?? [];
   }
 
-  async listEndpoints(): Promise<K8sEndpointsObject[]> {
-    const response = await this.fetchWithTimeout("/api/v1/endpoints");
+  async listEndpoints(namespace?: MonitorNamespaceScope): Promise<K8sEndpointsObject[]> {
+    const nsPath = this.namespacePath(namespace);
+    const response = await this.fetchWithTimeout(
+      `/api/v1${nsPath}/endpoints`,
+      {},
+      LIST_FETCH_TIMEOUT_MS,
+    );
     if (!response.ok) {
       throw new Error(`Failed to list endpoints (${response.status})`);
     }
@@ -262,7 +370,7 @@ export class K8sApiClient {
   }
 
   async listNodes(): Promise<K8sNodeSummary[]> {
-    const response = await this.fetchWithTimeout("/api/v1/nodes");
+    const response = await this.fetchWithTimeout("/api/v1/nodes", {}, LIST_FETCH_TIMEOUT_MS);
     if (!response.ok) {
       throw new Error(`Failed to list nodes (${response.status})`);
     }
@@ -309,8 +417,64 @@ export class K8sApiClient {
     return map;
   }
 
-  async listPodsOnNodes(): Promise<Array<{ namespace: string; name: string; nodeName: string }>> {
-    const pods = await this.listPods();
+  async listPodMetrics(namespace?: MonitorNamespaceScope): Promise<K8sPodMetricSummary[]> {
+    const scoped = resolveK8sNamespace(namespace ?? ALL_NAMESPACES);
+    const path = scoped
+      ? `/apis/metrics.k8s.io/v1beta1/namespaces/${encodeURIComponent(scoped)}/pods`
+      : "/apis/metrics.k8s.io/v1beta1/pods";
+    const response = await this.fetchWithTimeout(path, {}, LIST_FETCH_TIMEOUT_MS);
+    if (!response.ok) {
+      return [];
+    }
+    const body = (await response.json()) as K8sList<{
+      metadata: { name: string; namespace?: string };
+      containers?: Array<{ usage?: { cpu?: string; memory?: string } }>;
+    }>;
+    return (body.items ?? []).map((item) => {
+      let cpuNano = 0;
+      let memoryKi = 0;
+      for (const container of item.containers ?? []) {
+        cpuNano += parseNanoCpu(container.usage?.cpu) ?? 0;
+        memoryKi += parseKiQuantity(container.usage?.memory) ?? 0;
+      }
+      return {
+        namespace: item.metadata.namespace ?? "default",
+        name: item.metadata.name,
+        cpuUsageNano: cpuNano > 0 ? cpuNano : undefined,
+        memoryUsedKi: memoryKi > 0 ? memoryKi : undefined,
+      };
+    });
+  }
+
+  async listPodsOnNode(
+    nodeName: string,
+    namespace?: MonitorNamespaceScope,
+  ): Promise<Array<{ namespace: string; name: string; nodeName: string }>> {
+    const nsPath = this.namespacePath(namespace);
+    const query = new URLSearchParams({
+      fieldSelector: `spec.nodeName=${nodeName}`,
+      limit: "500",
+    });
+    const response = await this.fetchWithTimeout(
+      `/api/v1${nsPath}/pods?${query.toString()}`,
+      {},
+      LIST_FETCH_TIMEOUT_MS,
+    );
+    if (!response.ok) {
+      throw new Error(`Failed to list pods on node ${nodeName} (${response.status})`);
+    }
+    const body = (await response.json()) as K8sList<K8sPodObject>;
+    return (body.items ?? [])
+      .map((pod) => ({
+        namespace: pod.metadata.namespace ?? "default",
+        name: pod.metadata.name,
+        nodeName: pod.spec?.nodeName ?? nodeName,
+      }))
+      .filter((pod) => pod.name.length > 0);
+  }
+
+  async listPodsOnNodes(namespace?: MonitorNamespaceScope): Promise<Array<{ namespace: string; name: string; nodeName: string }>> {
+    const pods = await this.listPods(namespace);
     return pods
       .map((pod) => ({
         namespace: pod.metadata.namespace ?? "default",
@@ -318,6 +482,25 @@ export class K8sApiClient {
         nodeName: pod.spec?.nodeName ?? "",
       }))
       .filter((pod) => pod.nodeName.length > 0);
+  }
+
+  async listAgentPods(namespace?: string): Promise<Array<{ namespace: string; name: string; nodeName: string }>> {
+    const query = new URLSearchParams({ labelSelector: "app=kern-agent" });
+    const path = namespace
+      ? `/api/v1/namespaces/${encodeURIComponent(namespace)}/pods?${query.toString()}`
+      : `/api/v1/pods?${query.toString()}`;
+    const response = await this.fetchWithTimeout(path, {}, LIST_FETCH_TIMEOUT_MS);
+    if (!response.ok) {
+      throw new Error(`Failed to list kern-agent pods (${response.status})`);
+    }
+    const body = (await response.json()) as K8sList<K8sPodObject>;
+    return (body.items ?? [])
+      .map((pod) => ({
+        namespace: pod.metadata.namespace ?? "default",
+        name: pod.metadata.name,
+        nodeName: pod.spec?.nodeName ?? "",
+      }))
+      .filter((pod) => pod.name.length > 0 && pod.nodeName.length > 0);
   }
 
   async listLabeledPods(
@@ -345,10 +528,13 @@ export class K8sApiClient {
     podName: string,
     port: number,
     proxyPath: string,
+    timeoutMs = DEFAULT_FETCH_TIMEOUT_MS,
   ): Promise<Response> {
     const normalized = proxyPath.startsWith("/") ? proxyPath : `/${proxyPath}`;
     return this.fetchWithTimeout(
       `/api/v1/namespaces/${encodeURIComponent(namespace)}/pods/${encodeURIComponent(podName)}:${port}/proxy${normalized}`,
+      {},
+      timeoutMs,
     );
   }
 
@@ -356,8 +542,10 @@ export class K8sApiClient {
     resourceVersion: string,
     onEvent: (event: K8sEventObject, type: "ADDED" | "MODIFIED" | "DELETED") => void,
     signal: AbortSignal,
+    namespace?: MonitorNamespaceScope,
   ): Promise<void> {
-    const path = `/api/v1/events?watch=1&resourceVersion=${encodeURIComponent(resourceVersion)}`;
+    const nsPath = this.namespacePath(namespace);
+    const path = `/api/v1${nsPath}/events?watch=1&resourceVersion=${encodeURIComponent(resourceVersion)}`;
     const response = await fetch(this.url(path), {
       headers: {
         ...this.headers(),
