@@ -3,6 +3,10 @@ import { NestFactory } from "@nestjs/core";
 import { IoAdapter } from "@nestjs/platform-socket.io";
 import { AppModule } from "./app.module";
 
+process.on("unhandledRejection", (reason) => {
+  console.error("[kern-api] unhandled rejection (API kept running):", reason);
+});
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.useWebSocketAdapter(new IoAdapter(app));

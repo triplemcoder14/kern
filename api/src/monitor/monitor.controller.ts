@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Inject, Param, Post, Query, UseGuards } from "@nestjs/common";
+import { resolveKubeContextName } from "../../../src/core/kubeconfig/resolve-context";
 import type { ConnectClusterInput } from "../../../src/core/types/monitoring";
 import { AuthGuard } from "../auth/auth.guard";
 import { MonitorService } from "./monitor.service";
@@ -10,6 +11,12 @@ export class MonitorController {
   @Get("health")
   health() {
     return { ok: true, service: "kern-api" };
+  }
+
+  @UseGuards(AuthGuard)
+  @Get("context")
+  contextName() {
+    return { name: resolveKubeContextName() };
   }
 
   @UseGuards(AuthGuard)

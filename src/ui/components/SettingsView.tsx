@@ -108,6 +108,7 @@ export function SettingsView({
   const [storageBusy, setStorageBusy] = useState(false);
   const [storageNote, setStorageNote] = useState<string | null>(null);
   const [storageError, setStorageError] = useState<string | null>(null);
+  const [localError, setLocalError] = useState<string | null>(null);
 
   useEffect(() => {
     void fetchStorageSettings()
@@ -169,17 +170,27 @@ export function SettingsView({
           </div>
 
           <div className="settings-fields">
-            <SettingsField label="Cluster name">
+            <SettingsField
+              label="Cluster name"
+              hint="Display name shown in the console (e.g. ocp-uat, prod-east)"
+            >
               <input
                 value={config.clusterName}
-                onChange={(e) => updateConfig("clusterName", e.target.value)}
+                onChange={(e) => {
+                  setLocalError(null);
+                  updateConfig("clusterName", e.target.value);
+                }}
                 className="settings-input"
                 disabled={connected}
-                placeholder="minikube"
+                placeholder="My cluster"
+                required
               />
             </SettingsField>
 
-            <SettingsField label="Agent URL" hint="Port-forward or in-cluster agent endpoint">
+            <SettingsField
+              label="Agent URL"
+              hint="Optional local port-forward; otherwise KERN reaches the in-cluster agent via kubectl proxy"
+            >
               <input
                 value={config.ebpfCollectorUrl}
                 onChange={(e) => updateConfig("ebpfCollectorUrl", e.target.value)}
@@ -227,7 +238,9 @@ export function SettingsView({
             ) : null}
           </div>
 
-          {error ? <div className="settings-alert settings-alert-error">{error}</div> : null}
+          {localError || error ? (
+            <div className="settings-alert settings-alert-error">{localError ?? error}</div>
+          ) : null}
 
           <div className="settings-actions">
             {!connected ? (
@@ -235,7 +248,14 @@ export function SettingsView({
                 type="button"
                 className="settings-btn settings-btn-primary"
                 disabled={busy}
-                onClick={() => void onConnect(config)}
+                onClick={() => {
+                  if (!config.clusterName.trim()) {
+                    setLocalError("Cluster name is required.");
+                    return;
+                  }
+                  setLocalError(null);
+                  void onConnect(config);
+                }}
               >
                 {busy ? "Connecting…" : "Connect"}
               </button>

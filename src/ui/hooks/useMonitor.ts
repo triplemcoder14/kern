@@ -9,6 +9,7 @@ import type {
 } from "../../core/types/monitoring";
 import type { NetworkSnapshot } from "../../core/types/network";
 import { loadClusterConfig } from "../../core/config/cluster-config";
+import { trimMonitorEvents } from "../../core/monitoring/retention";
 import { getMonitorApiClient } from "../../lib/monitor-api";
 
 const EMPTY_NETWORK: NetworkSnapshot = {
@@ -20,7 +21,7 @@ const EMPTY_NETWORK: NetworkSnapshot = {
 const EMPTY_HEALTH: ClusterHealthSnapshot = {
   health: "disconnected",
   connected: false,
-  clusterName: "minikube",
+  clusterName: "Not connected",
   podCount: 0,
   runningPods: 0,
   failedPods: 0,
@@ -55,9 +56,7 @@ export function useMonitor() {
       for (const event of batch) {
         merged.set(event.id, event);
       }
-      return [...merged.values()]
-        .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
-        .slice(0, 300);
+      return trimMonitorEvents([...merged.values()].sort((a, b) => b.timestamp.localeCompare(a.timestamp)));
     });
   }, []);
 
@@ -98,6 +97,7 @@ export function useMonitor() {
           break;
         case "DISCONNECTED":
           setConnection(null);
+          setNamespaces([]);
           break;
         case "MONITOR_EVENT":
           queueEvent(event.event);
@@ -180,6 +180,18 @@ export function useMonitor() {
     [client],
   );
 
+  const setNamespace = useCallback(
+    async (namespace: string) => {
+      try {
+        await client.request({ type: "SET_NAMESPACE", namespace });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to set namespace scope";
+        setError(message);
+      }
+    },
+    [client],
+  );
+
   const openIncidents = useMemo(
     () => incidents.filter((incident) => incident.status === "open"),
     [incidents],
@@ -204,5 +216,6 @@ export function useMonitor() {
     connect,
     disconnect,
     resolveIncident,
+    setNamespace,
   };
 }
