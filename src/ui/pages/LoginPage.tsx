@@ -3,6 +3,8 @@ import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { KernWordmark } from "../components/KernWordmark";
 import { useAuth } from "../hooks/useAuth";
 
+const WEBSITE_URL = "https://trykern.xyz";
+
 export function LoginPage() {
   const { user, loading, login } = useAuth();
   const navigate = useNavigate();
@@ -37,7 +39,7 @@ export function LoginPage() {
   return (
     <div className="admin-login">
       <div className="admin-login-card">
-        <Link to="/" className="admin-login-brand">
+        <Link to="/app" className="admin-login-brand">
           <KernWordmark />
         </Link>
         <p className="admin-login-eyebrow">Self-hosted</p>
@@ -67,14 +69,14 @@ export function LoginPage() {
             />
           </label>
           {error ? <div className="admin-alert">{error}</div> : null}
-          <button type="submit" className="landing-btn landing-btn-primary admin-login-btn" disabled={submitting}>
+          <button type="submit" className="admin-login-btn" disabled={submitting}>
             {submitting ? "Signing in…" : "Sign in"}
           </button>
         </form>
 
-        <Link to="/" className="admin-login-back">
+        <a href={WEBSITE_URL} className="admin-login-back">
           Back to website
-        </Link>
+        </a>
       </div>
     </div>
   );
