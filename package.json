@@ -15,7 +15,6 @@
     "dev:api": "npm run start:dev --prefix api",
     "build": "npm run build:web && npm run build --prefix api",
     "build:web": "tsc -b && vite build",
-    "deploy:landing": "bash scripts/deploy-landing.sh",
     "lint": "oxlint",
     "preview": "vite preview"
   },
