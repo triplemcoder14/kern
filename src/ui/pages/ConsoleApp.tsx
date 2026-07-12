@@ -21,7 +21,7 @@ export function ConsoleApp() {
   const { user, logout } = useAuth();
   const [page, setPage] = useState<NavPage>("overview");
   const [activeNav, setActiveNav] = useState<NavId>("overview");
-  const [namespace, setNamespace] = useState("all");
+  const [namespace, setNamespaceState] = useState("all");
   const [paused, setPaused] = useState(false);
   const [soundMuted, setSoundMuted] = useState(isAlertSoundMuted);
 
@@ -35,9 +35,16 @@ export function ConsoleApp() {
     }
   };
 
+  const handleNamespaceChange = (value: string) => {
+    setNamespaceState(value);
+    void monitor.setNamespace(value);
+  };
+
   const handleConnect = async (config: ClusterConfig) => {
     saveClusterConfig(config);
     await monitor.connect(configToConnectInput(config));
+    // UI defaults to "all"; sync that into the monitor (backend used to stay on "default").
+    await monitor.setNamespace(namespace);
   };
 
   const savedClusterName = loadClusterConfig().clusterName.trim() || "cluster";
@@ -62,7 +69,7 @@ export function ConsoleApp() {
     clusterName,
     namespace,
     namespaces: monitor.namespaces,
-    onNamespaceChange: setNamespace,
+    onNamespaceChange: handleNamespaceChange,
     connected: monitor.health.connected,
   };
 
