@@ -42,6 +42,7 @@ import {
   trimMonitorEvents,
 } from "../core/monitoring/retention";
 import {
+  ALL_NAMESPACES,
   pollIntervalMs,
   type MonitorNamespaceScope,
 } from "../core/monitoring/scope";
@@ -114,7 +115,7 @@ export class MonitorRuntime {
   private watchAbort: AbortController | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private connected = false;
-  private activeNamespace: MonitorNamespaceScope = "default";
+  private activeNamespace: MonitorNamespaceScope = ALL_NAMESPACES;
   private eventTimestamps: number[] = [];
   private knownNamespaces: string[] = [];
   private networkEngine = new NetworkEngine();
