@@ -133,6 +133,90 @@ function SettingsField({
   );
 }
 
+function IconGlobe() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden className="settings-card-icon-svg">
+      <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="1.5" />
+      <path
+        d="M3 12h18M12 3c2.5 2.8 3.8 5.8 3.8 9s-1.3 6.2-3.8 9c-2.5-2.8-3.8-5.8-3.8-9s1.3-6.2 3.8-9z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+      />
+    </svg>
+  );
+}
+
+function IconStorage() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden className="settings-card-icon-svg">
+      <ellipse cx="12" cy="6" rx="7" ry="2.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
+      <path
+        d="M5 6v4c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5V6M5 10v4c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5v-4M5 14v4c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5v-4"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+      />
+    </svg>
+  );
+}
+
+function IconClock() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden className="settings-card-icon-svg">
+      <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M12 7v5l3.5 2" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function IconShield() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden className="settings-card-icon-svg">
+      <path
+        d="M12 3l7 3v5c0 4.5-2.8 7.8-7 9-4.2-1.2-7-4.5-7-9V6l7-3z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function IconSave() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden width="14" height="14">
+      <path
+        d="M5 5h11l3 3v11H5V5zM8 5v4h7V5M8 19v-6h8v6"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function IconChevron({ open }: { open: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      aria-hidden
+      className={`settings-chevron${open ? " settings-chevron-open" : ""}`}
+    >
+      <path
+        d="M6 9l6 6 6-6"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 export function SettingsView({
   busy,
   connected,
@@ -141,17 +225,14 @@ export function SettingsView({
   onDisconnect,
 }: SettingsViewProps) {
   const [config, setConfig] = useState<ClusterConfig>(loadClusterConfig);
-  const [advanced, setAdvanced] = useState(
+  const [advancedOpen, setAdvancedOpen] = useState(
     Boolean(config.token.trim() || config.kubeconfig.trim()),
   );
   const [storage, setStorage] = useState<StorageForm>(EMPTY_STORAGE);
-  const [storageBusy, setStorageBusy] = useState(false);
-  const [storageNote, setStorageNote] = useState<string | null>(null);
-  const [storageError, setStorageError] = useState<string | null>(null);
   const [retention, setRetention] = useState<RetentionForm>(EMPTY_RETENTION);
-  const [retentionBusy, setRetentionBusy] = useState(false);
-  const [retentionNote, setRetentionNote] = useState<string | null>(null);
-  const [retentionError, setRetentionError] = useState<string | null>(null);
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [saveNote, setSaveNote] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -160,7 +241,7 @@ export function SettingsView({
         setStorage(storageToForm(view));
       })
       .catch((loadError) => {
-        setStorageError(loadError instanceof Error ? loadError.message : "Failed to load storage");
+        setSaveError(loadError instanceof Error ? loadError.message : "Failed to load storage");
       });
 
     void fetchRetentionSettings()
@@ -168,9 +249,7 @@ export function SettingsView({
         setRetention(retentionToForm(view));
       })
       .catch((loadError) => {
-        setRetentionError(
-          loadError instanceof Error ? loadError.message : "Failed to load retention",
-        );
+        setSaveError(loadError instanceof Error ? loadError.message : "Failed to load retention");
       });
   }, []);
 
@@ -184,43 +263,36 @@ export function SettingsView({
 
   const updateStorage = <K extends keyof StorageForm>(key: K, value: StorageForm[K]) => {
     setStorage((prev) => ({ ...prev, [key]: value }));
-    setStorageNote(null);
-    setStorageError(null);
+    setSaveNote(null);
+    setSaveError(null);
   };
 
   const updateRetention = <K extends keyof RetentionForm>(key: K, value: RetentionForm[K]) => {
     setRetention((prev) => ({ ...prev, [key]: value }));
-    setRetentionNote(null);
-    setRetentionError(null);
+    setSaveNote(null);
+    setSaveError(null);
   };
 
-  const handleSaveStorage = async () => {
-    setStorageBusy(true);
-    setStorageError(null);
+  const handleSaveAll = async () => {
+    setSaveBusy(true);
+    setSaveError(null);
+    setSaveNote(null);
     try {
-      const result = await saveStorageSettings(formToSaved(storage));
-      setStorage(storageToForm(result));
-      setStorageNote(result.restartRequired ? "Saved. Restart the API to apply storage changes." : "Saved.");
-    } catch (saveError) {
-      setStorageError(saveError instanceof Error ? saveError.message : "Failed to save storage");
-    } finally {
-      setStorageBusy(false);
-    }
-  };
-
-  const handleSaveRetention = async () => {
-    setRetentionBusy(true);
-    setRetentionError(null);
-    try {
-      const result = await saveRetentionSettings(retention);
-      setRetention(retentionToForm(result));
-      setRetentionNote("Saved. New caps apply to live data and future writes.");
-    } catch (saveError) {
-      setRetentionError(
-        saveError instanceof Error ? saveError.message : "Failed to save retention",
+      const [storageResult, retentionResult] = await Promise.all([
+        saveStorageSettings(formToSaved(storage)),
+        saveRetentionSettings(retention),
+      ]);
+      setStorage(storageToForm(storageResult));
+      setRetention(retentionToForm(retentionResult));
+      setSaveNote(
+        storageResult.restartRequired
+          ? "Saved. Restart the API to apply storage backend changes."
+          : "All settings saved.",
       );
+    } catch (saveErr) {
+      setSaveError(saveErr instanceof Error ? saveErr.message : "Failed to save settings");
     } finally {
-      setRetentionBusy(false);
+      setSaveBusy(false);
     }
   };
 
@@ -230,19 +302,41 @@ export function SettingsView({
         <div>
           <h1 className="settings-title">Settings</h1>
           <p className="settings-subtitle">
-            Connect your cluster, choose storage, and cap how long KERN keeps data.
+            Configure how KERN connects, stores, and retains data.
           </p>
         </div>
+        <button
+          type="button"
+          className="settings-btn settings-btn-primary settings-save-all"
+          disabled={saveBusy}
+          onClick={() => void handleSaveAll()}
+        >
+          <IconSave />
+          {saveBusy ? "Saving…" : "Save all"}
+        </button>
       </header>
 
-      <div className="settings-layout">
-        <section className="settings-panel">
-          <div className="settings-panel-head">
-            <div>
-              <h2 className="settings-panel-title">Cluster</h2>
-              <p className="settings-panel-desc">Agent URL and optional credentials.</p>
+      <div className="settings-stack">
+        {saveError ? <div className="settings-alert settings-alert-error">{saveError}</div> : null}
+        {saveNote ? <div className="settings-alert settings-alert-ok">{saveNote}</div> : null}
+        {localError || error ? (
+          <div className="settings-alert settings-alert-error">{localError ?? error}</div>
+        ) : null}
+
+        <div className="settings-grid-top">
+        <section className="settings-card">
+          <div className="settings-card-head">
+            <div className="settings-card-title-row">
+              <span className="settings-card-icon">
+                <IconGlobe />
+              </span>
+              <div>
+                <h2 className="settings-card-title">Cluster</h2>
+                <p className="settings-card-desc">Connect to your cluster agent.</p>
+              </div>
             </div>
-            <span className={`settings-pill${connected ? " settings-pill-on" : ""}`}>
+            <span className={`settings-status${connected ? " settings-status-on" : ""}`}>
+              <span className="settings-status-dot" aria-hidden />
               {connected ? "Connected" : "Offline"}
             </span>
           </div>
@@ -250,7 +344,7 @@ export function SettingsView({
           <div className="settings-fields">
             <SettingsField
               label="Cluster name"
-              hint="Display name shown in the console (e.g. ocp-uat, prod-east)"
+              hint="Shown in the console (e.g. ocp-uat, prod-east)"
             >
               <input
                 value={config.clusterName}
@@ -267,7 +361,7 @@ export function SettingsView({
 
             <SettingsField
               label="Agent URL"
-              hint="Optional local port-forward; otherwise KERN reaches the in-cluster agent via kubectl proxy"
+              hint="KERN agent endpoint. Use local port-forward or in-cluster URL."
             >
               <input
                 value={config.ebpfCollectorUrl}
@@ -277,50 +371,9 @@ export function SettingsView({
                 placeholder="http://127.0.0.1:9474"
               />
             </SettingsField>
-
-            <button
-              type="button"
-              className="settings-advanced-toggle"
-              disabled={connected}
-              onClick={() => setAdvanced((value) => !value)}
-            >
-              {advanced ? "Hide advanced" : "Advanced"}
-            </button>
-
-            {advanced ? (
-              <>
-                <SettingsField label="Bearer token">
-                  <input
-                    value={config.token}
-                    onChange={(e) => updateConfig("token", e.target.value)}
-                    className="settings-input"
-                    disabled={connected}
-                    type="password"
-                    autoComplete="off"
-                    placeholder="Optional"
-                  />
-                </SettingsField>
-
-                <SettingsField label="Kubeconfig">
-                  <textarea
-                    value={config.kubeconfig}
-                    onChange={(e) => updateConfig("kubeconfig", e.target.value)}
-                    className="settings-textarea"
-                    disabled={connected}
-                    spellCheck={false}
-                    placeholder="Paste kubeconfig YAML"
-                    rows={5}
-                  />
-                </SettingsField>
-              </>
-            ) : null}
           </div>
 
-          {localError || error ? (
-            <div className="settings-alert settings-alert-error">{localError ?? error}</div>
-          ) : null}
-
-          <div className="settings-actions">
+          <div className="settings-card-actions">
             {!connected ? (
               <button
                 type="button"
@@ -350,11 +403,16 @@ export function SettingsView({
           </div>
         </section>
 
-        <section className="settings-panel">
-          <div className="settings-panel-head">
-            <div>
-              <h2 className="settings-panel-title">Storage</h2>
-              <p className="settings-panel-desc">Local files for dev, or your own S3-compatible bucket.</p>
+        <section className="settings-card">
+          <div className="settings-card-head">
+            <div className="settings-card-title-row">
+              <span className="settings-card-icon">
+                <IconStorage />
+              </span>
+              <div>
+                <h2 className="settings-card-title">Storage</h2>
+                <p className="settings-card-desc">Choose where KERN stores data.</p>
+              </div>
             </div>
           </div>
 
@@ -381,7 +439,7 @@ export function SettingsView({
 
           <div className="settings-fields">
             {storage.backend === "file" ? (
-              <SettingsField label="Data directory" hint="Used when the API runs with local file storage">
+              <SettingsField label="Data directory" hint="Used by API and agent for local storage.">
                 <input
                   value={storage.dataDir}
                   onChange={(e) => updateStorage("dataDir", e.target.value)}
@@ -450,36 +508,32 @@ export function SettingsView({
               </>
             )}
           </div>
-
-          {storageError ? <div className="settings-alert settings-alert-error">{storageError}</div> : null}
-          {storageNote ? <div className="settings-alert settings-alert-ok">{storageNote}</div> : null}
-
-          <div className="settings-actions">
-            <button
-              type="button"
-              className="settings-btn settings-btn-primary"
-              disabled={storageBusy}
-              onClick={() => void handleSaveStorage()}
-            >
-              {storageBusy ? "Saving…" : "Save storage"}
-            </button>
-          </div>
         </section>
+        </div>
 
-        <section className="settings-panel">
-          <div className="settings-panel-head">
-            <div>
-              <h2 className="settings-panel-title">Data retention</h2>
-              <p className="settings-panel-desc">
-                Cap how long events and network snapshots stay on disk so storage does not grow without bound.
-              </p>
+        <section className="settings-card">
+          <div className="settings-card-head">
+            <div className="settings-card-title-row">
+              <span className="settings-card-icon">
+                <IconClock />
+              </span>
+              <div>
+                <h2 className="settings-card-title">Data retention</h2>
+                <p className="settings-card-desc">
+                  Cap how long data is kept and how much is stored.
+                </p>
+              </div>
             </div>
           </div>
 
           <div className="settings-fields">
             <SettingsField
               label="Event window"
-              hint="Drop monitor events older than this window (count-only keeps the newest N)"
+              hint={
+                retention.maxEventAgeHours === 0
+                  ? "Count-only mode keeps the newest events in memory."
+                  : "Drop monitor events older than this window."
+              }
             >
               <div
                 className="settings-segment settings-segment-wrap"
@@ -501,8 +555,8 @@ export function SettingsView({
               </div>
             </SettingsField>
 
-            <div className="settings-field-row">
-              <SettingsField label="Max events" hint="Newest events kept in memory and on disk">
+            <div className="settings-retention-grid">
+              <SettingsField label="Max events" hint="Newest events kept">
                 <input
                   type="number"
                   min={50}
@@ -512,7 +566,7 @@ export function SettingsView({
                   className="settings-input settings-input-mono"
                 />
               </SettingsField>
-              <SettingsField label="Max incidents" hint="Open incidents always kept; resolved trimmed">
+              <SettingsField label="Max incidents" hint="Open incidents kept">
                 <input
                   type="number"
                   min={10}
@@ -522,10 +576,7 @@ export function SettingsView({
                   className="settings-input settings-input-mono"
                 />
               </SettingsField>
-            </div>
-
-            <div className="settings-field-row">
-              <SettingsField label="Max snapshots" hint="Network snapshot files retained">
+              <SettingsField label="Max snapshots" hint="Snapshots retained">
                 <input
                   type="number"
                   min={10}
@@ -535,7 +586,7 @@ export function SettingsView({
                   className="settings-input settings-input-mono"
                 />
               </SettingsField>
-              <SettingsField label="Flows per snapshot" hint="Flows stored inside each snapshot file">
+              <SettingsField label="Flows per snapshot" hint="Flows stored per snapshot">
                 <input
                   type="number"
                   min={20}
@@ -548,36 +599,66 @@ export function SettingsView({
                 />
               </SettingsField>
             </div>
-
-            <SettingsField label="Live flow buffer" hint="Flows kept in the live network engine">
-              <input
-                type="number"
-                min={50}
-                max={2000}
-                value={retention.maxFlows}
-                onChange={(e) => updateRetention("maxFlows", Number(e.target.value) || 50)}
-                className="settings-input settings-input-mono"
-              />
-            </SettingsField>
           </div>
+        </section>
 
-          {retentionError ? (
-            <div className="settings-alert settings-alert-error">{retentionError}</div>
-          ) : null}
-          {retentionNote ? (
-            <div className="settings-alert settings-alert-ok">{retentionNote}</div>
-          ) : null}
+        <section className="settings-card settings-card-advanced">
+          <button
+            type="button"
+            className="settings-advanced-trigger"
+            aria-expanded={advancedOpen}
+            onClick={() => setAdvancedOpen((value) => !value)}
+          >
+            <div className="settings-card-title-row">
+              <span className="settings-card-icon">
+                <IconShield />
+              </span>
+              <div className="settings-advanced-copy">
+                <h2 className="settings-card-title">Advanced</h2>
+                <p className="settings-card-desc">Optional network settings.</p>
+              </div>
+            </div>
+            <IconChevron open={advancedOpen} />
+          </button>
 
-          <div className="settings-actions">
-            <button
-              type="button"
-              className="settings-btn settings-btn-primary"
-              disabled={retentionBusy}
-              onClick={() => void handleSaveRetention()}
-            >
-              {retentionBusy ? "Saving…" : "Save retention"}
-            </button>
-          </div>
+          {advancedOpen ? (
+            <div className="settings-fields settings-advanced-body">
+              <SettingsField label="Live flow buffer" hint="Flows kept in the live network engine">
+                <input
+                  type="number"
+                  min={50}
+                  max={2000}
+                  value={retention.maxFlows}
+                  onChange={(e) => updateRetention("maxFlows", Number(e.target.value) || 50)}
+                  className="settings-input settings-input-mono"
+                />
+              </SettingsField>
+
+              <SettingsField label="Bearer token">
+                <input
+                  value={config.token}
+                  onChange={(e) => updateConfig("token", e.target.value)}
+                  className="settings-input"
+                  disabled={connected}
+                  type="password"
+                  autoComplete="off"
+                  placeholder="Optional"
+                />
+              </SettingsField>
+
+              <SettingsField label="Kubeconfig">
+                <textarea
+                  value={config.kubeconfig}
+                  onChange={(e) => updateConfig("kubeconfig", e.target.value)}
+                  className="settings-textarea"
+                  disabled={connected}
+                  spellCheck={false}
+                  placeholder="Paste kubeconfig YAML"
+                  rows={5}
+                />
+              </SettingsField>
+            </div>
+          ) : null}
         </section>
       </div>
     </div>
