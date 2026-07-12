@@ -349,8 +349,10 @@ func (r *KernMonitorReconciler) ensureClusterObject(ctx context.Context, desired
 	current := desired.DeepCopyObject().(client.Object)
 	if err := r.Get(ctx, key, current); apierrors.IsNotFound(err) {
 		return r.Create(ctx, desired)
+	} else if err != nil {
+		return err
 	}
-	return client.IgnoreNotFound(err)
+	return nil
 }
 
 func setCondition(conditions *[]metav1.Condition, condType string, ready bool, message string) {
