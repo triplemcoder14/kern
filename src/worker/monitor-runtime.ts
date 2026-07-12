@@ -125,6 +125,8 @@ export class MonitorRuntime {
   private healthEmitTimer: ReturnType<typeof setTimeout> | null = null;
   private networkEmitTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingNetworkSnapshot: NetworkSnapshot | null = null;
+  /** When true, NETWORK_SNAPSHOT emits skip the 4s throttle (namespace switches). */
+  private immediateNetworkEmit = false;
   private lastSnapshotPersistAt = 0;
 
   private readonly persistence: MonitorPersistence;
@@ -259,11 +261,14 @@ export class MonitorRuntime {
     this.connected = true;
 
     this.networkEngine.configure(ebpfCollectorUrl, origin);
-    this.networkEngine.setScope(this.activeNamespace);
     this.networkEngine.onRefreshError((message) => {
       this.emit({ type: "ERROR", message });
     });
     this.networkEngine.onUpdate((snapshot) => {
+      if (this.immediateNetworkEmit) {
+        this.publishNetworkSnapshot(snapshot);
+        return;
+      }
       this.pendingNetworkSnapshot = snapshot;
       if (this.networkEmitTimer) {
         return;
@@ -275,11 +280,10 @@ export class MonitorRuntime {
         if (!pending) {
           return;
         }
-        this.emit({ type: "NETWORK_SNAPSHOT", snapshot: pending });
-        void this.onNetworkSnapshot(pending);
-        this.scheduleHealthEmit();
+        this.publishNetworkSnapshot(pending);
       }, NETWORK_EMIT_MIN_MS);
     });
+    void this.networkEngine.setScope(this.activeNamespace);
     this.networkEngine.start(this.client);
 
     const saved: SavedConnectionConfig = {
@@ -389,18 +393,40 @@ export class MonitorRuntime {
     });
   }
 
-  private setNamespace(namespace: string): { namespace: string } {
-    const next = namespace.trim() || "default";
+  private async setNamespace(namespace: string): Promise<{ namespace: string }> {
+    const next = (namespace.trim() || ALL_NAMESPACES) as MonitorNamespaceScope;
     if (next === this.activeNamespace) {
       return { namespace: next };
     }
     this.activeNamespace = next;
-    this.networkEngine.setScope(next);
-    if (next !== "all") {
+
+    // Flush any pending throttled snapshot and bypass NETWORK_EMIT_MIN_MS for this change.
+    if (this.networkEmitTimer) {
+      clearTimeout(this.networkEmitTimer);
+      this.networkEmitTimer = null;
+    }
+    this.pendingNetworkSnapshot = null;
+    this.immediateNetworkEmit = true;
+
+    try {
+      await this.networkEngine.setScope(next);
+      this.publishNetworkSnapshot(this.networkEngine.getSnapshot());
+      this.emitHealth();
+    } finally {
+      this.immediateNetworkEmit = false;
+    }
+
+    if (next !== ALL_NAMESPACES) {
       this.events = this.events.filter(
         (event) => !event.namespace || event.namespace === next,
       );
+      this.emit({
+        type: "MONITOR_SNAPSHOT",
+        events: this.events,
+        incidents: [...this.incidents.values()],
+      });
     }
+
     if (this.connected && this.client) {
       this.restartWatchersForScope();
       void this.seedFromCluster().catch((error) => {
@@ -409,6 +435,12 @@ export class MonitorRuntime {
       });
     }
     return { namespace: next };
+  }
+
+  private publishNetworkSnapshot(snapshot: NetworkSnapshot): void {
+    this.emit({ type: "NETWORK_SNAPSHOT", snapshot });
+    void this.onNetworkSnapshot(snapshot);
+    this.scheduleHealthEmit(true);
   }
 
   private podPollIntervalMs(): number {
@@ -507,6 +539,7 @@ export class MonitorRuntime {
       this.networkEmitTimer = null;
     }
     this.pendingNetworkSnapshot = null;
+    this.immediateNetworkEmit = false;
   }
 
   private async runEventWatch(): Promise<void> {
