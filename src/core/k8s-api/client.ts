@@ -1,5 +1,49 @@
 import type { ClusterConnectionConfig } from "../types/monitoring";
 import { ALL_NAMESPACES, resolveK8sNamespace, type MonitorNamespaceScope } from "../monitoring/scope";
+import { resolveKubeContextName } from "../kubeconfig/resolve-context";
+
+const KUBECTL_PROXY_PORT = 8001;
+
+function kubectlProxyHint(): string {
+  const context = resolveKubeContextName();
+  if (context) {
+    return `Start kubectl proxy: kubectl proxy --port=${KUBECTL_PROXY_PORT} --context=${context}`;
+  }
+  return `Start kubectl proxy: kubectl proxy --port=${KUBECTL_PROXY_PORT}`;
+}
+
+function isLocalKubectlProxy(proxyUrl: string): boolean {
+  try {
+    const parsed = new URL(proxyUrl.startsWith("http") ? proxyUrl : `http://${proxyUrl}`);
+    const host = parsed.hostname;
+    const port = parsed.port || (parsed.protocol === "https:" ? "443" : "80");
+    const localHost =
+      host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]";
+    return localHost && port === String(KUBECTL_PROXY_PORT);
+  } catch {
+    return /127\.0\.0\.1:8001|localhost:8001/.test(proxyUrl);
+  }
+}
+
+function unauthorizedProxyHint(proxyUrl: string): string {
+  if (isLocalKubectlProxy(proxyUrl)) {
+    return [
+      "Unauthorized from kubectl proxy.",
+      "Restart it with your active context:",
+      `kubectl proxy --port=${KUBECTL_PROXY_PORT}`,
+      "If Settings → Advanced has a Bearer token, clear it — local proxy already authenticates via kubeconfig.",
+    ].join(" ");
+  }
+  return "Unauthorized — check the Bearer token / kubeconfig credentials for this cluster.";
+}
+
+function deadProxyClusterHint(): string {
+  const context = resolveKubeContextName();
+  if (context) {
+    return `kubectl proxy is pointing at a dead cluster (context: ${context}). Check kubectl config get-contexts, then restart: kubectl proxy --port=${KUBECTL_PROXY_PORT} --context=<your-context>`;
+  }
+  return `kubectl proxy is pointing at a dead cluster. Check kubectl config current-context, then: kubectl proxy --port=${KUBECTL_PROXY_PORT}`;
+}
 
 interface ListMeta {
   resourceVersion?: string;
@@ -157,7 +201,9 @@ export class K8sApiClient {
     const headers: Record<string, string> = {
       Accept: "application/json",
     };
-    if (this.config.token) {
+    // Local kubectl proxy already authenticates with kubeconfig (certs/exec).
+    // A leftover Bearer token (e.g. from OpenShift) overrides that and causes 401.
+    if (this.config.token && !isLocalKubectlProxy(this.config.proxyUrl)) {
       headers.Authorization = `Bearer ${this.config.token}`;
     }
     return headers;
@@ -195,22 +241,23 @@ export class K8sApiClient {
     try {
       response = await this.fetchWithTimeout("/version");
     } catch (error) {
-      const hint = "Start kubectl proxy: kubectl proxy --port=8001 --context=minikube";
       const detail =
         error instanceof Error && error.name === "AbortError"
           ? "timed out after 10s"
           : error instanceof Error
             ? error.message
             : "network error";
-      throw new Error(`${hint} (${detail})`);
+      throw new Error(`${kubectlProxyHint()} (${detail})`);
     }
 
     if (!response.ok) {
       const body = await response.text();
-      const hint =
-        body.includes("no such host") || body.includes("dial tcp")
-          ? "kubectl proxy is pointing at a dead cluster. Run: kubectl config use-context minikube && kubectl proxy --port=8001 --context=minikube"
-          : body.trim() || response.statusText;
+      let hint = body.trim() || response.statusText;
+      if (body.includes("no such host") || body.includes("dial tcp")) {
+        hint = deadProxyClusterHint();
+      } else if (response.status === 401 || body.includes("Unauthorized")) {
+        hint = unauthorizedProxyHint(this.config.proxyUrl);
+      }
       throw new Error(`Cluster unreachable (${response.status}): ${hint}`);
     }
 
