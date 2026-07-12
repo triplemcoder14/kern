@@ -1,13 +1,22 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, OnModuleInit } from "@nestjs/common";
 import { resolveStorageConfig } from "../../../storage/config";
 import type {
   SavedStorageSettings,
   StorageSettingsView,
 } from "../../../src/core/types/storage-settings";
+import type {
+  RetentionSettingsView,
+  SavedRetentionSettings,
+} from "../../../src/core/types/retention-settings";
 import {
   loadSavedStorageSettings,
   saveSavedStorageSettings,
 } from "../../../storage/settings-config";
+import {
+  loadSavedRetentionSettings,
+  saveSavedRetentionSettings,
+} from "../../../storage/retention-config";
+import { applySavedRetention, policyToSaved } from "../../../storage/retention";
 
 function defaultDataDir(): string {
   return process.env.KERN_DATA_DIR?.trim() || `${process.cwd()}/data`;
@@ -37,8 +46,25 @@ function toView(config: ReturnType<typeof resolveStorageConfig>): StorageSetting
   };
 }
 
+function clampRetention(input: SavedRetentionSettings): SavedRetentionSettings {
+  return {
+    maxEventAgeHours: Math.min(168, Math.max(0, Math.floor(input.maxEventAgeHours))),
+    maxEvents: Math.min(5000, Math.max(50, Math.floor(input.maxEvents))),
+    maxIncidents: Math.min(1000, Math.max(10, Math.floor(input.maxIncidents))),
+    maxSnapshots: Math.min(500, Math.max(10, Math.floor(input.maxSnapshots))),
+    maxFlows: Math.min(2000, Math.max(50, Math.floor(input.maxFlows))),
+    maxSnapshotFlows: Math.min(500, Math.max(20, Math.floor(input.maxSnapshotFlows))),
+  };
+}
+
 @Injectable()
-export class SettingsService {
+export class SettingsService implements OnModuleInit {
+  async onModuleInit(): Promise<void> {
+    const dataDir = defaultDataDir();
+    const saved = await loadSavedRetentionSettings(dataDir);
+    applySavedRetention(saved);
+  }
+
   async getStorageSettings(): Promise<StorageSettingsView> {
     const dataDir = defaultDataDir();
     const saved = await loadSavedStorageSettings(dataDir);
@@ -72,5 +98,20 @@ export class SettingsService {
     const config = resolveStorageConfig(process.env, next);
     const view = toView(config);
     return { ...view, restartRequired: true };
+  }
+
+  async getRetentionSettings(): Promise<RetentionSettingsView> {
+    const dataDir = defaultDataDir();
+    const saved = await loadSavedRetentionSettings(dataDir);
+    const applied = applySavedRetention(saved);
+    return { ...policyToSaved(applied), applied };
+  }
+
+  async saveRetentionSettings(input: SavedRetentionSettings): Promise<RetentionSettingsView> {
+    const dataDir = defaultDataDir();
+    const next = clampRetention(input);
+    await saveSavedRetentionSettings(dataDir, next);
+    const applied = applySavedRetention(next);
+    return { ...policyToSaved(applied), applied };
   }
 }

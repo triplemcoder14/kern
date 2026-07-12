@@ -5,10 +5,13 @@ import {
   type ClusterConfig,
 } from "../../core/config/cluster-config";
 import {
+  fetchRetentionSettings,
   fetchStorageSettings,
+  saveRetentionSettings,
   saveStorageSettings,
 } from "../../lib/settings-api";
 import type { SavedStorageSettings, StorageSettingsView } from "../../core/types/storage-settings";
+import type { SavedRetentionSettings } from "../../core/types/retention-settings";
 
 interface SettingsViewProps {
   busy: boolean;
@@ -29,6 +32,15 @@ interface StorageForm {
   secretAccessKey: string;
 }
 
+interface RetentionForm {
+  maxEventAgeHours: number;
+  maxEvents: number;
+  maxIncidents: number;
+  maxSnapshots: number;
+  maxFlows: number;
+  maxSnapshotFlows: number;
+}
+
 const EMPTY_STORAGE: StorageForm = {
   backend: "file",
   dataDir: "",
@@ -39,6 +51,23 @@ const EMPTY_STORAGE: StorageForm = {
   accessKeyId: "",
   secretAccessKey: "",
 };
+
+const EMPTY_RETENTION: RetentionForm = {
+  maxEventAgeHours: 6,
+  maxEvents: 300,
+  maxIncidents: 100,
+  maxSnapshots: 60,
+  maxFlows: 200,
+  maxSnapshotFlows: 80,
+};
+
+const RETENTION_WINDOWS = [
+  { label: "1 hour", hours: 1 },
+  { label: "6 hours", hours: 6 },
+  { label: "24 hours", hours: 24 },
+  { label: "7 days", hours: 168 },
+  { label: "Count only", hours: 0 },
+] as const;
 
 function storageToForm(view: StorageSettingsView): StorageForm {
   return {
@@ -75,6 +104,17 @@ function formToSaved(form: StorageForm): SavedStorageSettings {
   };
 }
 
+function retentionToForm(settings: SavedRetentionSettings): RetentionForm {
+  return {
+    maxEventAgeHours: settings.maxEventAgeHours,
+    maxEvents: settings.maxEvents,
+    maxIncidents: settings.maxIncidents,
+    maxSnapshots: settings.maxSnapshots,
+    maxFlows: settings.maxFlows,
+    maxSnapshotFlows: settings.maxSnapshotFlows,
+  };
+}
+
 function SettingsField({
   label,
   hint,
@@ -108,6 +148,10 @@ export function SettingsView({
   const [storageBusy, setStorageBusy] = useState(false);
   const [storageNote, setStorageNote] = useState<string | null>(null);
   const [storageError, setStorageError] = useState<string | null>(null);
+  const [retention, setRetention] = useState<RetentionForm>(EMPTY_RETENTION);
+  const [retentionBusy, setRetentionBusy] = useState(false);
+  const [retentionNote, setRetentionNote] = useState<string | null>(null);
+  const [retentionError, setRetentionError] = useState<string | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -117,6 +161,16 @@ export function SettingsView({
       })
       .catch((loadError) => {
         setStorageError(loadError instanceof Error ? loadError.message : "Failed to load storage");
+      });
+
+    void fetchRetentionSettings()
+      .then((view) => {
+        setRetention(retentionToForm(view));
+      })
+      .catch((loadError) => {
+        setRetentionError(
+          loadError instanceof Error ? loadError.message : "Failed to load retention",
+        );
       });
   }, []);
 
@@ -134,6 +188,12 @@ export function SettingsView({
     setStorageError(null);
   };
 
+  const updateRetention = <K extends keyof RetentionForm>(key: K, value: RetentionForm[K]) => {
+    setRetention((prev) => ({ ...prev, [key]: value }));
+    setRetentionNote(null);
+    setRetentionError(null);
+  };
+
   const handleSaveStorage = async () => {
     setStorageBusy(true);
     setStorageError(null);
@@ -148,12 +208,30 @@ export function SettingsView({
     }
   };
 
+  const handleSaveRetention = async () => {
+    setRetentionBusy(true);
+    setRetentionError(null);
+    try {
+      const result = await saveRetentionSettings(retention);
+      setRetention(retentionToForm(result));
+      setRetentionNote("Saved. New caps apply to live data and future writes.");
+    } catch (saveError) {
+      setRetentionError(
+        saveError instanceof Error ? saveError.message : "Failed to save retention",
+      );
+    } finally {
+      setRetentionBusy(false);
+    }
+  };
+
   return (
     <div className="settings-page">
       <header className="settings-header">
         <div>
           <h1 className="settings-title">Settings</h1>
-          <p className="settings-subtitle">Connect your cluster and choose where KERN persists data.</p>
+          <p className="settings-subtitle">
+            Connect your cluster, choose storage, and cap how long KERN keeps data.
+          </p>
         </div>
       </header>
 
@@ -384,6 +462,120 @@ export function SettingsView({
               onClick={() => void handleSaveStorage()}
             >
               {storageBusy ? "Saving…" : "Save storage"}
+            </button>
+          </div>
+        </section>
+
+        <section className="settings-panel">
+          <div className="settings-panel-head">
+            <div>
+              <h2 className="settings-panel-title">Data retention</h2>
+              <p className="settings-panel-desc">
+                Cap how long events and network snapshots stay on disk so storage does not grow without bound.
+              </p>
+            </div>
+          </div>
+
+          <div className="settings-fields">
+            <SettingsField
+              label="Event window"
+              hint="Drop monitor events older than this window (count-only keeps the newest N)"
+            >
+              <div
+                className="settings-segment settings-segment-wrap"
+                role="tablist"
+                aria-label="Event retention window"
+              >
+                {RETENTION_WINDOWS.map((option) => (
+                  <button
+                    key={option.hours}
+                    type="button"
+                    role="tab"
+                    aria-selected={retention.maxEventAgeHours === option.hours}
+                    className={`settings-segment-btn${retention.maxEventAgeHours === option.hours ? " active" : ""}`}
+                    onClick={() => updateRetention("maxEventAgeHours", option.hours)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </SettingsField>
+
+            <div className="settings-field-row">
+              <SettingsField label="Max events" hint="Newest events kept in memory and on disk">
+                <input
+                  type="number"
+                  min={50}
+                  max={5000}
+                  value={retention.maxEvents}
+                  onChange={(e) => updateRetention("maxEvents", Number(e.target.value) || 50)}
+                  className="settings-input settings-input-mono"
+                />
+              </SettingsField>
+              <SettingsField label="Max incidents" hint="Open incidents always kept; resolved trimmed">
+                <input
+                  type="number"
+                  min={10}
+                  max={1000}
+                  value={retention.maxIncidents}
+                  onChange={(e) => updateRetention("maxIncidents", Number(e.target.value) || 10)}
+                  className="settings-input settings-input-mono"
+                />
+              </SettingsField>
+            </div>
+
+            <div className="settings-field-row">
+              <SettingsField label="Max snapshots" hint="Network snapshot files retained">
+                <input
+                  type="number"
+                  min={10}
+                  max={500}
+                  value={retention.maxSnapshots}
+                  onChange={(e) => updateRetention("maxSnapshots", Number(e.target.value) || 10)}
+                  className="settings-input settings-input-mono"
+                />
+              </SettingsField>
+              <SettingsField label="Flows per snapshot" hint="Flows stored inside each snapshot file">
+                <input
+                  type="number"
+                  min={20}
+                  max={500}
+                  value={retention.maxSnapshotFlows}
+                  onChange={(e) =>
+                    updateRetention("maxSnapshotFlows", Number(e.target.value) || 20)
+                  }
+                  className="settings-input settings-input-mono"
+                />
+              </SettingsField>
+            </div>
+
+            <SettingsField label="Live flow buffer" hint="Flows kept in the live network engine">
+              <input
+                type="number"
+                min={50}
+                max={2000}
+                value={retention.maxFlows}
+                onChange={(e) => updateRetention("maxFlows", Number(e.target.value) || 50)}
+                className="settings-input settings-input-mono"
+              />
+            </SettingsField>
+          </div>
+
+          {retentionError ? (
+            <div className="settings-alert settings-alert-error">{retentionError}</div>
+          ) : null}
+          {retentionNote ? (
+            <div className="settings-alert settings-alert-ok">{retentionNote}</div>
+          ) : null}
+
+          <div className="settings-actions">
+            <button
+              type="button"
+              className="settings-btn settings-btn-primary"
+              disabled={retentionBusy}
+              onClick={() => void handleSaveRetention()}
+            >
+              {retentionBusy ? "Saving…" : "Save retention"}
             </button>
           </div>
         </section>
