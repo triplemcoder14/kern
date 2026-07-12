@@ -1,5 +1,4 @@
 import { useMemo, useState } from "react";
-import { flameColor } from "../../core/network/flame-colors";
 import type {
   KernelHotspot,
   NodeHealth,
@@ -8,7 +7,6 @@ import type {
   ProcessSample,
   ProfileLogLine,
   ProfileMetric,
-  ProfileStackFrame,
   ProfileStackSource,
   TimelineEvent,
 } from "../../core/types/profiling";
@@ -17,6 +15,7 @@ import { useNodeProfile } from "../hooks/useNodeProfile";
 import { HotPathStack } from "./profiler/HotPathStack";
 import { InsightCards } from "./profiler/InsightCards";
 import { InvestigationPanel, type InvestigationTarget } from "./profiler/InvestigationPanel";
+import { NetworkFlameStack } from "./profiler/NetworkFlameStack";
 
 interface ProfilingDashboardProps {
   clusterName: string;
@@ -79,41 +78,6 @@ function Sparkline({ values, tone }: { values: number[]; tone?: string }) {
     <svg className={`profile-sparkline${tone ? ` profile-sparkline-${tone}` : ""}`} viewBox="0 0 80 20" aria-hidden>
       <polyline points={points} />
     </svg>
-  );
-}
-
-function FlameStack({ frames, label }: { frames: ProfileStackFrame[]; label: string }) {
-  const rowHeight = 22;
-  const width = 360;
-  const depthRows = Math.max(...frames.map((frame) => frame.depth), 0) + 1;
-  const height = depthRows * rowHeight + 8;
-
-  return (
-    <div className="profile-flamegraph-wrap">
-      <span className="profile-panel-label">{label}</span>
-      <svg className="profile-flamegraph" viewBox={`0 0 ${width} ${height}`} aria-hidden>
-        {frames.map((frame) => {
-          const y = 4 + frame.depth * rowHeight;
-          const blockWidth = Math.max(24, frame.width * width);
-          const x = frame.offset * (width - blockWidth);
-          return (
-            <g key={`${frame.label}-${frame.depth}-${frame.offset}`}>
-              <rect
-                x={x}
-                y={y}
-                width={blockWidth}
-                height={18}
-                rx={3}
-                fill={flameColor(frame.heat, 0.92)}
-              />
-              <text x={x + 8} y={y + 12} className="profile-flame-label">
-                {frame.label.length > 28 ? `${frame.label.slice(0, 26)}…` : frame.label}
-              </text>
-            </g>
-          );
-        })}
-      </svg>
-    </div>
   );
 }
 
@@ -544,7 +508,7 @@ export function ProfilingDashboard({
                         </div>
                       ))}
                     </div>
-                    <FlameStack frames={detail.stack} label="Network flame stack" />
+                    <NetworkFlameStack frames={detail.stack} label="Network flame stack" />
                     <NetworkLog lines={detail.log} />
                   </>
                 ) : null}
