@@ -55,6 +55,26 @@ export function retentionPolicy(): RetentionPolicy {
   return DEFAULT_RETENTION_POLICY;
 }
 
+/** Override the effective policy (Settings UI / saved config). */
+export function setRuntimePolicy(policy: RetentionPolicy): RetentionPolicy {
+  runtimePolicy = {
+    maxEvents: Math.max(50, Math.floor(policy.maxEvents)),
+    maxIncidents: Math.max(10, Math.floor(policy.maxIncidents)),
+    maxEventAgeMs: Math.max(0, Math.floor(policy.maxEventAgeMs)),
+    maxSnapshots: Math.max(10, Math.floor(policy.maxSnapshots)),
+    maxFlows: Math.max(50, Math.floor(policy.maxFlows)),
+    maxSnapshotFlows: Math.max(20, Math.floor(policy.maxSnapshotFlows)),
+  };
+  return runtimePolicy;
+}
+
+export function mergeRetentionPolicy(
+  base: RetentionPolicy,
+  overrides: Partial<RetentionPolicy>,
+): RetentionPolicy {
+  return setRuntimePolicy({ ...base, ...overrides });
+}
+
 function eventTimestampMs(event: MonitorEvent): number {
   const parsed = Date.parse(event.timestamp);
   return Number.isFinite(parsed) ? parsed : 0;

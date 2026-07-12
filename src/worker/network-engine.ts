@@ -5,10 +5,10 @@ import {
   buildTopology,
   flowFromNetworkEvent,
 } from "../core/network/topology";
+import { retentionPolicy } from "../core/monitoring/retention";
 import type { MonitorEvent } from "../core/types/monitoring";
 import type { NetworkFlow, NetworkSnapshot, NetworkTopology } from "../core/types/network";
 
-const MAX_FLOWS = 200;
 const POLL_MS = 8_000;
 
 export class NetworkEngine {
@@ -127,7 +127,7 @@ export class NetworkEngine {
       this.flows[index] = flow;
     } else {
       this.flows.unshift(flow);
-      this.flows = this.flows.slice(0, MAX_FLOWS);
+      this.flows = this.flows.slice(0, retentionPolicy().maxFlows);
     }
   }
 
