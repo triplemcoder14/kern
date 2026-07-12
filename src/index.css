@@ -1058,6 +1058,12 @@ input {
   background: var(--surface);
 }
 
+.settings-segment-wrap {
+  flex-wrap: wrap;
+  border-radius: 14px;
+  max-width: 100%;
+}
+
 .settings-segment-btn {
   border: none;
   background: transparent;
