@@ -3928,6 +3928,106 @@ tbody tr.selected {
   font-family: "JetBrains Mono", ui-monospace, monospace;
 }
 
+.network-flame {
+  border-bottom: 1px solid var(--border);
+}
+
+.network-flame-graph {
+  border-bottom: none;
+}
+
+.network-flame-hint {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.network-flame-detail {
+  padding: 14px 18px 18px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+}
+
+.network-flame-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.network-flame-detail-title {
+  margin: 4px 0 0;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.network-flame-detail-sub {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.network-flame-share {
+  flex-shrink: 0;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.network-flame-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 18px;
+}
+
+.network-flame-kv {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+
+.network-flame-kv span:first-child {
+  color: var(--muted);
+}
+
+.network-flame-kv span:last-child {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.network-flame-path {
+  margin-top: 14px;
+}
+
+.network-flame-path code {
+  display: block;
+  margin-top: 6px;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.45;
+  word-break: break-all;
+  background: color-mix(in srgb, var(--bg) 80%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+@media (max-width: 720px) {
+  .network-flame-detail-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+
 .profile-events {
   flex: 1;
   min-height: 0;
@@ -6257,6 +6357,106 @@ tbody tr.selected {
   font-size: 9px;
   font-family: "JetBrains Mono", ui-monospace, monospace;
 }
+
+.network-flame {
+  border-bottom: 1px solid var(--border);
+}
+
+.network-flame-graph {
+  border-bottom: none;
+}
+
+.network-flame-hint {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.network-flame-detail {
+  padding: 14px 18px 18px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+}
+
+.network-flame-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.network-flame-detail-title {
+  margin: 4px 0 0;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.network-flame-detail-sub {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.network-flame-share {
+  flex-shrink: 0;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.network-flame-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 18px;
+}
+
+.network-flame-kv {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+
+.network-flame-kv span:first-child {
+  color: var(--muted);
+}
+
+.network-flame-kv span:last-child {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.network-flame-path {
+  margin-top: 14px;
+}
+
+.network-flame-path code {
+  display: block;
+  margin-top: 6px;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.45;
+  word-break: break-all;
+  background: color-mix(in srgb, var(--bg) 80%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+@media (max-width: 720px) {
+  .network-flame-detail-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 
 .profile-events {
   flex: 1;

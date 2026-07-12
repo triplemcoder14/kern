@@ -7,11 +7,25 @@ import (
 )
 
 type StackFrame struct {
-	Label  string  `json:"label"`
-	Depth  int     `json:"depth"`
-	Width  float64 `json:"width"`
-	Offset float64 `json:"offset"`
-	Heat   float64 `json:"heat"`
+	ID           string  `json:"id,omitempty"`
+	Label        string  `json:"label"`
+	Subtitle     string  `json:"subtitle,omitempty"`
+	Depth        int     `json:"depth"`
+	Width        float64 `json:"width"`
+	Offset       float64 `json:"offset"`
+	Heat         float64 `json:"heat"`
+	Kind         string  `json:"kind,omitempty"`
+	Protocol     string  `json:"protocol,omitempty"`
+	Port         uint16  `json:"port,omitempty"`
+	Namespace    string  `json:"namespace,omitempty"`
+	EndpointKind string  `json:"endpointKind,omitempty"`
+	IP           string  `json:"ip,omitempty"`
+	Bytes        uint64  `json:"bytes,omitempty"`
+	Retransmits  uint32  `json:"retransmits,omitempty"`
+	LatencyMs    uint32  `json:"latencyMs,omitempty"`
+	SharePct     int     `json:"sharePct,omitempty"`
+	Path         string  `json:"path,omitempty"`
+	FlowCount    int     `json:"flowCount,omitempty"`
 }
 
 type LogLine struct {

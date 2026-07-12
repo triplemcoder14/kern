@@ -281,42 +281,328 @@ function resolveAgentForNode(
   };
 }
 
+function flowBytes(flow: NetworkFlow): number {
+  return (flow.bytesSent ?? 0) + (flow.bytesReceived ?? 0);
+}
+
+function endpointLabel(endpoint: NetworkFlow["dst"] | NetworkFlow["src"]): {
+  label: string;
+  subtitle?: string;
+  namespace?: string;
+  endpointKind: string;
+  ip?: string;
+} {
+  const namespace = endpoint.namespace;
+  const kind = endpoint.kind;
+  const isIpOnly = /^\d{1,3}(\.\d{1,3}){3}$/.test(endpoint.name) || Boolean(endpoint.ip && endpoint.name === endpoint.ip);
+
+  if (kind === "Service" && namespace) {
+    return {
+      label: endpoint.name,
+      subtitle: `Service · ${namespace}`,
+      namespace,
+      endpointKind: kind,
+      ip: endpoint.ip,
+    };
+  }
+  if (kind === "Pod" && namespace) {
+    const short = endpoint.name.length > 40 ? `${endpoint.name.slice(0, 36)}…` : endpoint.name;
+    return {
+      label: short,
+      subtitle: `Pod · ${namespace}`,
+      namespace,
+      endpointKind: kind,
+      ip: endpoint.ip,
+    };
+  }
+  if (kind === "External" || isIpOnly) {
+    return {
+      label: endpoint.name || endpoint.ip || "external",
+      subtitle: endpoint.ip && endpoint.name !== endpoint.ip ? endpoint.ip : "External",
+      endpointKind: "External",
+      ip: endpoint.ip ?? endpoint.name,
+    };
+  }
+  return {
+    label: endpoint.name,
+    subtitle: kind,
+    namespace,
+    endpointKind: kind,
+    ip: endpoint.ip,
+  };
+}
+
+function contribution(flow: NetworkFlow): number {
+  const latency = flow.latencyMs ?? 0;
+  const bytes = flowBytes(flow);
+  const retransmits = flow.retransmits ?? 0;
+  // Prefer bytes when present; otherwise weight latency so slow flows still surface.
+  return Math.max(bytes, 1) + latency * 2_000 + retransmits * 50_000;
+}
+
+function enrichAgentStack(frames: ProfileStackFrame[]): ProfileStackFrame[] {
+  return frames.map((frame, index) => ({
+    ...frame,
+    id: frame.id ?? `agent-${index}-${frame.depth}-${frame.label}`,
+    kind: frame.kind ?? (frame.depth === 0 ? "root" : "hop"),
+    sharePct: frame.sharePct ?? Math.round(frame.width * 100),
+  }));
+}
+
+/**
+ * Build an actionable network flame:
+ * network stack → protocol → destination → source workload
+ */
 function buildStack(flows: NetworkFlow[], agentStack?: ProfileStackFrame[]): ProfileStackFrame[] {
   if (agentStack && agentStack.length > 0) {
-    return agentStack;
+    return enrichAgentStack(agentStack);
+  }
+  if (flows.length === 0) {
+    return [
+      {
+        id: "root",
+        label: "network stack",
+        depth: 0,
+        width: 1,
+        offset: 0,
+        heat: 0.15,
+        kind: "root",
+        sharePct: 100,
+      },
+    ];
   }
 
-  const buckets = new Map<string, { latency: number; count: number }>();
+  type Agg = {
+    key: string;
+    label: string;
+    subtitle?: string;
+    namespace?: string;
+    endpointKind?: string;
+    ip?: string;
+    protocol: string;
+    port: number;
+    bytes: number;
+    retransmits: number;
+    latencyMs: number;
+    flowCount: number;
+    score: number;
+    path?: string;
+    sources: Map<
+      string,
+      {
+        label: string;
+        subtitle?: string;
+        namespace?: string;
+        endpointKind?: string;
+        ip?: string;
+        bytes: number;
+        retransmits: number;
+        latencyMs: number;
+        flowCount: number;
+        score: number;
+        path?: string;
+      }
+    >;
+  };
+
+  const byProtocol = new Map<string, Map<string, Agg>>();
+  let totalScore = 0;
+
   for (const flow of flows) {
-    const label =
-      flow.path?.split("→").pop()?.trim() ??
-      `${flow.dst.kind}/${flow.dst.name}:${flow.port}`;
-    const current = buckets.get(label) ?? { latency: 0, count: 0 };
-    current.count += 1;
-    current.latency = Math.max(current.latency, flow.latencyMs ?? 0);
-    buckets.set(label, current);
+    const protocol = flow.protocol === "UNKNOWN" ? "TCP" : flow.protocol;
+    const dst = endpointLabel(flow.dst);
+    const dstKey = `${dst.endpointKind}:${dst.namespace ?? ""}:${flow.dst.name}:${flow.port}`;
+    const score = contribution(flow);
+    totalScore += score;
+
+    let endpoints = byProtocol.get(protocol);
+    if (!endpoints) {
+      endpoints = new Map();
+      byProtocol.set(protocol, endpoints);
+    }
+
+    let agg = endpoints.get(dstKey);
+    if (!agg) {
+      agg = {
+        key: dstKey,
+        label: dst.label,
+        subtitle: [dst.subtitle, `${protocol}/${flow.port}`].filter(Boolean).join(" · "),
+        namespace: dst.namespace,
+        endpointKind: dst.endpointKind,
+        ip: dst.ip,
+        protocol,
+        port: flow.port,
+        bytes: 0,
+        retransmits: 0,
+        latencyMs: 0,
+        flowCount: 0,
+        score: 0,
+        path: flow.path,
+        sources: new Map(),
+      };
+      endpoints.set(dstKey, agg);
+    }
+
+    agg.bytes += flowBytes(flow);
+    agg.retransmits += flow.retransmits ?? 0;
+    agg.latencyMs = Math.max(agg.latencyMs, flow.latencyMs ?? 0);
+    agg.flowCount += 1;
+    agg.score += score;
+    if (flow.path) {
+      agg.path = flow.path;
+    }
+
+    const src = endpointLabel(flow.src);
+    if (src.endpointKind === "Pod" || src.endpointKind === "Service") {
+      const srcKey = `${src.endpointKind}:${src.namespace ?? ""}:${flow.src.name}`;
+      const existing = agg.sources.get(srcKey) ?? {
+        label: src.label,
+        subtitle: src.subtitle,
+        namespace: src.namespace,
+        endpointKind: src.endpointKind,
+        ip: src.ip,
+        bytes: 0,
+        retransmits: 0,
+        latencyMs: 0,
+        flowCount: 0,
+        score: 0,
+        path: flow.path,
+      };
+      existing.bytes += flowBytes(flow);
+      existing.retransmits += flow.retransmits ?? 0;
+      existing.latencyMs = Math.max(existing.latencyMs, flow.latencyMs ?? 0);
+      existing.flowCount += 1;
+      existing.score += score;
+      if (flow.path) {
+        existing.path = flow.path;
+      }
+      agg.sources.set(srcKey, existing);
+    }
   }
 
-  const items = [...buckets.entries()]
-    .sort((a, b) => b[1].latency - a[1].latency)
-    .slice(0, 5);
-  const maxLatency = Math.max(...items.map(([, value]) => value.latency), 1);
+  const safeTotal = Math.max(totalScore, 1);
+  const protocolEntries = [...byProtocol.entries()]
+    .map(([protocol, endpoints]) => {
+      const score = [...endpoints.values()].reduce((sum, item) => sum + item.score, 0);
+      return { protocol, endpoints: [...endpoints.values()], score };
+    })
+    .sort((a, b) => b.score - a.score);
+
+  const maxLatency = Math.max(
+    ...protocolEntries.flatMap((entry) => entry.endpoints.map((item) => item.latencyMs)),
+    1,
+  );
 
   const stack: ProfileStackFrame[] = [
-    { label: "network stack", depth: 0, width: 1, offset: 0, heat: 0.15 },
+    {
+      id: "root",
+      label: "network stack",
+      subtitle: `${flows.length} flows`,
+      depth: 0,
+      width: 1,
+      offset: 0,
+      heat: 0.12,
+      kind: "root",
+      sharePct: 100,
+      flowCount: flows.length,
+      bytes: flows.reduce((sum, flow) => sum + flowBytes(flow), 0),
+    },
   ];
 
-  let offset = 0;
-  for (const [index, [label, value]] of items.entries()) {
-    const width = 0.35 + (value.latency / maxLatency) * 0.55;
+  let protocolOffset = 0;
+  for (const proto of protocolEntries.slice(0, 4)) {
+    const protoWidth = Math.max(0.12, proto.score / safeTotal);
+    const protoShare = Math.round((proto.score / safeTotal) * 100);
     stack.push({
-      label,
-      depth: 1 + (index % 2),
-      width,
-      offset,
-      heat: Math.min(1, value.latency / maxLatency + (value.count > 3 ? 0.1 : 0)),
+      id: `proto-${proto.protocol}`,
+      label: proto.protocol,
+      subtitle: `${proto.endpoints.length} destinations · ${protoShare}%`,
+      depth: 1,
+      width: protoWidth,
+      offset: protocolOffset,
+      heat: 0.2 + Math.min(0.35, protoShare / 100),
+      kind: "protocol",
+      protocol: proto.protocol,
+      sharePct: protoShare,
+      flowCount: proto.endpoints.reduce((sum, item) => sum + item.flowCount, 0),
+      bytes: proto.endpoints.reduce((sum, item) => sum + item.bytes, 0),
+      retransmits: proto.endpoints.reduce((sum, item) => sum + item.retransmits, 0),
+      latencyMs: Math.max(...proto.endpoints.map((item) => item.latencyMs), 0),
     });
-    offset += width * 0.55;
+
+    const topEndpoints = [...proto.endpoints].sort((a, b) => b.score - a.score).slice(0, 6);
+    const endpointScore = Math.max(
+      topEndpoints.reduce((sum, item) => sum + item.score, 0),
+      1,
+    );
+    let endpointOffset = protocolOffset;
+
+    for (const endpoint of topEndpoints) {
+      const width = Math.max(0.08, (endpoint.score / endpointScore) * protoWidth);
+      const sharePct = Math.round((endpoint.score / safeTotal) * 100);
+      const heat = Math.min(
+        1,
+        endpoint.latencyMs / maxLatency + (endpoint.retransmits > 0 ? 0.2 : 0) + sharePct / 200,
+      );
+      const endpointId = `dst-${proto.protocol}-${endpoint.key}`;
+      stack.push({
+        id: endpointId,
+        label: endpoint.label,
+        subtitle: endpoint.subtitle,
+        depth: 2,
+        width,
+        offset: endpointOffset,
+        heat,
+        kind: endpoint.endpointKind === "Service" ? "service" : "endpoint",
+        protocol: endpoint.protocol,
+        port: endpoint.port,
+        namespace: endpoint.namespace,
+        endpointKind: endpoint.endpointKind,
+        ip: endpoint.ip,
+        bytes: endpoint.bytes,
+        retransmits: endpoint.retransmits,
+        latencyMs: endpoint.latencyMs,
+        sharePct,
+        path: endpoint.path,
+        flowCount: endpoint.flowCount,
+      });
+
+      const topSources = [...endpoint.sources.values()].sort((a, b) => b.score - a.score).slice(0, 3);
+      const sourceScore = Math.max(
+        topSources.reduce((sum, item) => sum + item.score, 0),
+        1,
+      );
+      let sourceOffset = endpointOffset;
+      for (const source of topSources) {
+        const sourceWidth = Math.max(0.06, (source.score / sourceScore) * width);
+        stack.push({
+          id: `${endpointId}-src-${source.label}`,
+          label: source.label,
+          subtitle: source.subtitle,
+          depth: 3,
+          width: sourceWidth,
+          offset: sourceOffset,
+          heat: Math.min(1, heat * 0.85 + (source.latencyMs / maxLatency) * 0.2),
+          kind: "workload",
+          protocol: endpoint.protocol,
+          port: endpoint.port,
+          namespace: source.namespace,
+          endpointKind: source.endpointKind,
+          ip: source.ip,
+          bytes: source.bytes,
+          retransmits: source.retransmits,
+          latencyMs: source.latencyMs,
+          sharePct: Math.round((source.score / safeTotal) * 100),
+          path: source.path ?? endpoint.path,
+          flowCount: source.flowCount,
+        });
+        sourceOffset += sourceWidth * 0.92;
+      }
+
+      endpointOffset += width * 0.92;
+    }
+
+    protocolOffset += protoWidth * 0.95;
   }
 
   return stack;
