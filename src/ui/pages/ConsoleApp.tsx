@@ -40,7 +40,7 @@ export function ConsoleApp() {
     await monitor.connect(configToConnectInput(config));
   };
 
-  const savedClusterName = loadClusterConfig().clusterName.trim() || "minikube";
+  const savedClusterName = loadClusterConfig().clusterName.trim() || "cluster";
   const clusterName = monitor.connection?.clusterName?.trim()
     || (monitor.health.connected ? monitor.health.clusterName : savedClusterName)
     || savedClusterName;
