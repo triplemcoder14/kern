@@ -2,8 +2,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=lib/docker-arch.sh
+source "${ROOT}/scripts/lib/docker-arch.sh"
+
 IMAGE="${AGENT_IMAGE:-kern/agent:latest}"
-BUILDER="${DOCKER_BUILDKIT:-1}"
 USE_MINIKUBE_DOCKER=0
 
 pull_with_retry() {
@@ -35,11 +37,7 @@ pull_with_retry "golang:1.25-alpine"
 pull_with_retry "gcr.io/distroless/static-debian12"
 
 echo "Building KERN agent image: $IMAGE"
-DOCKER_BUILDKIT="$BUILDER" docker build \
-  --network=host \
-  --pull \
-  -t "$IMAGE" \
-  "$ROOT/agent"
+kern_build_go_image "$ROOT/agent" "$IMAGE" --network=host --pull
 
 if [[ "$USE_MINIKUBE_DOCKER" -eq 0 ]] && command -v minikube >/dev/null 2>&1 && minikube status >/dev/null 2>&1; then
   echo "Loading image into minikube..."

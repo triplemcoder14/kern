@@ -8,10 +8,14 @@
 #   AGENT_IMAGE=...       Agent image (default kern/agent:latest)
 #   OPERATOR_IMAGE=...    Operator image (default kern/operator:latest)
 #   IMAGE_PULL_POLICY=... KernMonitor agent pull policy (Never for minikube)
+#   DOCKER_PLATFORM=...   Override target platform (default: host arch, e.g. linux/arm64)
 #
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=lib/docker-arch.sh
+source "${ROOT}/scripts/lib/docker-arch.sh"
+
 AGENT_IMAGE="${AGENT_IMAGE:-kern/agent:latest}"
 OPERATOR_IMAGE="${OPERATOR_IMAGE:-kern/operator:latest}"
 PULL_POLICY="${IMAGE_PULL_POLICY:-IfNotPresent}"
@@ -25,9 +29,9 @@ fi
 
 if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
   echo "==> Building agent image ${AGENT_IMAGE}"
-  docker build -t "${AGENT_IMAGE}" "${ROOT}/agent"
+  kern_build_go_image "${ROOT}/agent" "${AGENT_IMAGE}"
   echo "==> Building operator image ${OPERATOR_IMAGE}"
-  docker build -t "${OPERATOR_IMAGE}" "${ROOT}/operator"
+  kern_build_go_image "${ROOT}/operator" "${OPERATOR_IMAGE}"
 fi
 
 if [[ "$USE_MINIKUBE_DOCKER" -eq 0 ]] && command -v minikube >/dev/null 2>&1 && minikube status >/dev/null 2>&1; then
