@@ -81,12 +81,36 @@ export interface ProfileMetric {
 
 export type ProfileStackSource = "proc" | "inferred" | "ebpf";
 
+export type ProfileStackFrameKind =
+  | "root"
+  | "protocol"
+  | "endpoint"
+  | "workload"
+  | "service"
+  | "hop";
+
 export interface ProfileStackFrame {
+  id?: string;
   label: string;
+  /** Secondary line: namespace, IP, or port detail */
+  subtitle?: string;
   depth: number;
   width: number;
   offset: number;
   heat: number;
+  kind?: ProfileStackFrameKind;
+  protocol?: string;
+  port?: number;
+  namespace?: string;
+  endpointKind?: string;
+  ip?: string;
+  bytes?: number;
+  retransmits?: number;
+  latencyMs?: number;
+  /** Share of total network contribution (0–100) */
+  sharePct?: number;
+  path?: string;
+  flowCount?: number;
 }
 
 export interface ProfileLogLine {
