@@ -19,7 +19,7 @@ import (
 	"github.com/kern/agent/internal/store"
 )
 
-const ProgramCount = programCount
+const ProgramCount = 1
 
 type Collector struct {
 	objs   flowsObjects

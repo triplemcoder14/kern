@@ -16,8 +16,12 @@ AGENT_IMAGE="${AGENT_IMAGE:-kern/agent:latest}"
 OPERATOR_IMAGE="${OPERATOR_IMAGE:-kern/operator:latest}"
 PULL_POLICY="${IMAGE_PULL_POLICY:-IfNotPresent}"
 USE_MINIKUBE_DOCKER=0
+CURRENT_CTX="$(kubectl config current-context 2>/dev/null || true)"
 
-if command -v minikube >/dev/null 2>&1 && minikube status >/dev/null 2>&1; then
+# Only bind Docker to minikube when that is the active cluster context.
+if [[ "$CURRENT_CTX" == "minikube" ]] \
+  && command -v minikube >/dev/null 2>&1 \
+  && minikube status >/dev/null 2>&1; then
   eval "$(minikube docker-env)"
   USE_MINIKUBE_DOCKER=1
   PULL_POLICY="${IMAGE_PULL_POLICY:-Never}"
@@ -27,10 +31,15 @@ if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
   echo "==> Building agent image ${AGENT_IMAGE}"
   docker build -t "${AGENT_IMAGE}" "${ROOT}/agent"
   echo "==> Building operator image ${OPERATOR_IMAGE}"
-  docker build -t "${OPERATOR_IMAGE}" "${ROOT}/operator"
+  # Match host/node architecture (defaults to amd64 in operator Dockerfile).
+  TARGETARCH="$(uname -m | sed 's/aarch64/arm64/;s/x86_64/amd64/')"
+  docker build --build-arg "TARGETARCH=${TARGETARCH}" -t "${OPERATOR_IMAGE}" "${ROOT}/operator"
 fi
 
-if [[ "$USE_MINIKUBE_DOCKER" -eq 0 ]] && command -v minikube >/dev/null 2>&1 && minikube status >/dev/null 2>&1; then
+if [[ "$USE_MINIKUBE_DOCKER" -eq 0 ]] \
+  && [[ "$CURRENT_CTX" == "minikube" ]] \
+  && command -v minikube >/dev/null 2>&1 \
+  && minikube status >/dev/null 2>&1; then
   minikube image load "${AGENT_IMAGE}" || true
   minikube image load "${OPERATOR_IMAGE}" || true
 fi

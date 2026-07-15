@@ -114,7 +114,7 @@ func normalizeSpec(spec kernv1alpha1.KernMonitorSpec) kernv1alpha1.KernMonitorSp
 		spec.Agent.Image = "kern/agent:latest"
 	}
 	if spec.Agent.Mode == "" {
-		spec.Agent.Mode = "auto"
+		spec.Agent.Mode = "ebpf"
 	}
 	if spec.Agent.Port == 0 {
 		spec.Agent.Port = 9474
@@ -253,6 +253,7 @@ func (r *KernMonitorReconciler) ensureAgentDaemonSet(ctx context.Context, ns, mo
 				Spec: corev1.PodSpec{
 					ServiceAccountName: agentServiceAccountName(monitorName),
 					HostNetwork:        true,
+					HostPID:            true,
 					DNSPolicy:          corev1.DNSClusterFirstWithHostNet,
 					Tolerations:        []corev1.Toleration{{Operator: corev1.TolerationOpExists}},
 					Containers: []corev1.Container{{
@@ -261,15 +262,24 @@ func (r *KernMonitorReconciler) ensureAgentDaemonSet(ctx context.Context, ns, mo
 						ImagePullPolicy: corev1.PullPolicy(spec.Agent.ImagePullPolicy),
 						Args:            args,
 						Ports:           []corev1.ContainerPort{{Name: "http", ContainerPort: port, Protocol: corev1.ProtocolTCP}},
-						Env: []corev1.EnvVar{{
-							Name: "NODE_NAME",
-							ValueFrom: &corev1.EnvVarSource{
-								FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"},
+						Env: []corev1.EnvVar{
+							{
+								Name: "NODE_NAME",
+								ValueFrom: &corev1.EnvVarSource{
+									FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"},
+								},
 							},
-						}},
+							{Name: "KUBELET_PODS_DIR", Value: "/var/lib/kubelet/pods"},
+						},
 						SecurityContext: &corev1.SecurityContext{
 							Privileged: boolPtr(true),
 							RunAsUser:  int64Ptr(0),
+						},
+						VolumeMounts: []corev1.VolumeMount{
+							{Name: "sys", MountPath: "/sys"},
+							{Name: "kernel-debug", MountPath: "/sys/kernel/debug"},
+							{Name: "kernel-tracing", MountPath: "/sys/kernel/tracing"},
+							{Name: "kubelet-pods", MountPath: "/var/lib/kubelet/pods", ReadOnly: true},
 						},
 						Resources: corev1.ResourceRequirements{
 							Requests: corev1.ResourceList{
@@ -282,6 +292,12 @@ func (r *KernMonitorReconciler) ensureAgentDaemonSet(ctx context.Context, ns, mo
 							},
 						},
 					}},
+					Volumes: []corev1.Volume{
+						{Name: "sys", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/sys"}}},
+						{Name: "kernel-debug", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/sys/kernel/debug"}}},
+						{Name: "kernel-tracing", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/sys/kernel/tracing"}}},
+						{Name: "kubelet-pods", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/var/lib/kubelet/pods", Type: hostPathType(corev1.HostPathDirectory)}}},
+					},
 				},
 			},
 		},
@@ -381,6 +397,8 @@ func setCondition(conditions *[]metav1.Condition, condType string, ready bool, m
 
 func boolPtr(v bool) *bool    { return &v }
 func int64Ptr(v int64) *int64 { return &v }
+
+func hostPathType(t corev1.HostPathType) *corev1.HostPathType { return &t }
 
 func resourceQuantity(value string) resource.Quantity {
 	q, err := resource.ParseQuantity(value)
