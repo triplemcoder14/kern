@@ -23,14 +23,13 @@ func init() {
 }
 
 type procSample struct {
-	pid           int
-	name          string
-	namespace     string
-	pod           string
-	cpuTicks      uint64
-	rssKB         uint64
-	cgroupCacheKB uint64
-	majorFaults   uint64
+	pid         int
+	name        string
+	namespace   string
+	pod         string
+	cpuTicks    uint64
+	rssKB       uint64
+	cgroup      cgroupMemStats
 }
 
 func (c *platformCollector) collectProcessSamples(limit int) ([]ProcessSample, []procSample) {
@@ -84,15 +83,38 @@ func (c *platformCollector) collectProcessSamples(limit int) ([]ProcessSample, [
 	}
 
 	out := make([]ProcessSample, 0, len(rankedList))
+	enrichedByPID := make(map[int]procSample, len(rankedList))
 	for _, item := range rankedList {
+		sample := item.sample
+		ns, pod := c.resolvePodFromPID(sample.pid)
+		cgroup := readProcessCgroupMem(sample.pid)
+		rssKB := readVmRSSKB(sample.pid)
+		if rssKB == 0 {
+			rssKB = sample.rssKB
+		}
+		enriched := procSample{
+			pid:       sample.pid,
+			name:      sample.name,
+			namespace: ns,
+			pod:       pod,
+			cpuTicks:  sample.cpuTicks,
+			rssKB:     rssKB,
+			cgroup:    cgroup,
+		}
+		enrichedByPID[sample.pid] = enriched
 		out = append(out, ProcessSample{
-			PID:        item.sample.pid,
-			Name:       item.sample.name,
-			Namespace:  item.sample.namespace,
-			Pod:        item.sample.pod,
+			PID:        enriched.pid,
+			Name:       enriched.name,
+			Namespace:  enriched.namespace,
+			Pod:        enriched.pod,
 			CPUPercent: item.cpu,
-			RSSMB:      item.sample.rssKB / 1024,
+			RSSMB:      enriched.rssKB / 1024,
 		})
+	}
+	for i := range current {
+		if enriched, ok := enrichedByPID[current[i].pid]; ok {
+			current[i] = enriched
+		}
 	}
 	return out, current
 }
@@ -103,6 +125,7 @@ func (c *platformCollector) scanProcesses() []procSample {
 		return nil
 	}
 
+	pageKB := pageSizeKB()
 	samples := make([]procSample, 0, 256)
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -119,17 +142,12 @@ func (c *platformCollector) scanProcesses() []procSample {
 		if stat.name == "kern-agent" {
 			continue
 		}
-		ns, pod := c.resolvePodFromPID(pid)
-		cacheKB, majorFaults := readProcessCgroupStats(pid)
+		// Light scan: /proc/<pid>/stat only. Pod/cgroup/status enrich happens for top-N.
 		samples = append(samples, procSample{
-			pid:           pid,
-			name:          stat.name,
-			namespace:     ns,
-			pod:           pod,
-			cpuTicks:      stat.utime + stat.stime,
-			rssKB:         stat.rss,
-			cgroupCacheKB: cacheKB,
-			majorFaults:   majorFaults,
+			pid:      pid,
+			name:     stat.name,
+			cpuTicks: stat.utime + stat.stime,
+			rssKB:    stat.rssPages * pageKB,
 		})
 	}
 	return samples
@@ -144,10 +162,40 @@ func ticksByPID(samples []procSample) map[int]uint64 {
 }
 
 type procStatData struct {
-	name  string
-	utime uint64
-	stime uint64
-	rss   uint64
+	name     string
+	utime    uint64
+	stime    uint64
+	rssPages uint64
+}
+
+func pageSizeKB() uint64 {
+	page := os.Getpagesize()
+	if page <= 0 {
+		return 4
+	}
+	return uint64(page / 1024)
+}
+
+func readVmRSSKB(pid int) uint64 {
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "status"))
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "VmRSS:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return 0
+		}
+		value, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			return 0
+		}
+		return value
+	}
+	return 0
 }
 
 func readProcStat(pid int) (procStatData, bool) {
@@ -162,8 +210,8 @@ func readProcStat(pid int) (procStatData, bool) {
 	name := strings.Trim(fields[1], "()")
 	utime, _ := strconv.ParseUint(fields[13], 10, 64)
 	stime, _ := strconv.ParseUint(fields[14], 10, 64)
-	rss, _ := strconv.ParseUint(fields[23], 10, 64)
-	return procStatData{name: name, utime: utime, stime: stime, rss: rss}, true
+	rssPages, _ := strconv.ParseUint(fields[23], 10, 64)
+	return procStatData{name: name, utime: utime, stime: stime, rssPages: rssPages}, true
 }
 
 func (c *platformCollector) resolvePodFromPID(pid int) (namespace, pod string) {
@@ -198,33 +246,36 @@ func podUIDCandidates(line string) []string {
 	rest := line[idx+3:]
 	rest = strings.TrimPrefix(rest, "-")
 	rest = strings.TrimPrefix(rest, "/")
+	rest = strings.TrimPrefix(rest, "_")
 
 	var token strings.Builder
 	for _, ch := range rest {
-		if (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F') || ch == '-' {
+		// containerd encodes pod UIDs with underscores instead of dashes.
+		if (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F') || ch == '-' || ch == '_' {
 			token.WriteRune(ch)
 			continue
 		}
 		break
 	}
 
-	raw := strings.Trim(token.String(), "-")
-	if len(raw) < 32 {
+	raw := strings.Trim(token.String(), "-_")
+	raw = strings.ReplaceAll(raw, "_", "-")
+	compact := strings.ReplaceAll(raw, "-", "")
+	if len(compact) < 32 {
 		return nil
 	}
-	if len(raw) > 36 {
-		raw = raw[:36]
+	if len(compact) > 32 {
+		compact = compact[:32]
 	}
 
-	candidates := []string{raw}
-	if !strings.Contains(raw, "-") && len(raw) == 32 {
-		candidates = append(candidates, formatPodUID(raw))
-	}
+	formatted := formatPodUID(compact)
+	candidates := []string{formatted, compact, strings.ReplaceAll(formatted, "-", "_")}
 	return candidates
 }
 
 func formatPodUID(raw string) string {
 	raw = strings.ReplaceAll(raw, "-", "")
+	raw = strings.ReplaceAll(raw, "_", "")
 	if len(raw) != 32 {
 		return raw
 	}
@@ -232,16 +283,33 @@ func formatPodUID(raw string) string {
 }
 
 func readKubeletPodMeta(podUID string) (namespace, pod string, ok bool) {
-	base := filepath.Join(kubeletPodsDir, podUID, "metadata")
-	podName, err := os.ReadFile(filepath.Join(base, "name"))
-	if err != nil {
-		return "", "", false
+	variants := []string{podUID}
+	compact := strings.ReplaceAll(strings.ReplaceAll(podUID, "-", ""), "_", "")
+	if len(compact) == 32 {
+		formatted := formatPodUID(compact)
+		variants = append(variants, formatted, compact, strings.ReplaceAll(formatted, "-", "_"))
 	}
-	nsName, err := os.ReadFile(filepath.Join(base, "namespace"))
-	if err != nil {
-		return "", "", false
+	seen := map[string]struct{}{}
+	for _, uid := range variants {
+		if uid == "" {
+			continue
+		}
+		if _, ok := seen[uid]; ok {
+			continue
+		}
+		seen[uid] = struct{}{}
+		base := filepath.Join(kubeletPodsDir, uid, "metadata")
+		podName, err := os.ReadFile(filepath.Join(base, "name"))
+		if err != nil {
+			continue
+		}
+		nsName, err := os.ReadFile(filepath.Join(base, "namespace"))
+		if err != nil {
+			continue
+		}
+		return strings.TrimSpace(string(nsName)), strings.TrimSpace(string(podName)), true
 	}
-	return strings.TrimSpace(string(nsName)), strings.TrimSpace(string(podName)), true
+	return "", "", false
 }
 
 func aggregateTopPods(processes []ProcessSample, samples []procSample, limit int) []PodConsumer {
@@ -250,6 +318,8 @@ func aggregateTopPods(processes []ProcessSample, samples []procSample, limit int
 		pod       string
 	}
 	buckets := map[key]*PodConsumer{}
+	seenCgroup := map[string]bool{}
+	procRSS := map[key]uint64{}
 
 	for _, sample := range samples {
 		if sample.pod == "" {
@@ -261,12 +331,38 @@ func aggregateTopPods(processes []ProcessSample, samples []procSample, limit int
 			current = &PodConsumer{Namespace: sample.namespace, Pod: sample.pod}
 			buckets[k] = current
 		}
-		current.RSSMB += sample.rssKB / 1024
-		if cacheMB := sample.cgroupCacheKB / 1024; cacheMB > current.CacheMB {
-			current.CacheMB = cacheMB
+		procRSS[k] += sample.rssKB / 1024
+
+		cgroupPath := sample.cgroup.path
+		if cgroupPath == "" || seenCgroup[cgroupPath] {
+			continue
 		}
-		if sample.majorFaults > current.PageFaults {
-			current.PageFaults = sample.majorFaults
+		seenCgroup[cgroupPath] = true
+
+		if sample.cgroup.currentKB > 0 {
+			current.RSSMB += sample.cgroup.currentKB / 1024
+			current.WorkingSetMB += sample.cgroup.currentKB / 1024
+		}
+		current.AnonymousMB += sample.cgroup.anonKB / 1024
+		current.CacheMB += sample.cgroup.fileKB / 1024
+		if sample.cgroup.majorFaults > current.MajorFaults {
+			current.MajorFaults = sample.cgroup.majorFaults
+			current.PageFaults = sample.cgroup.majorFaults
+		}
+		if sample.cgroup.minorFaults > current.MinorFaults {
+			current.MinorFaults = sample.cgroup.minorFaults
+		}
+		if sample.cgroup.limitKB > 0 {
+			limitMB := sample.cgroup.limitKB / 1024
+			current.MemoryLimitMB += limitMB
+		}
+	}
+
+	// Fall back to summed process RSS when cgroup current was unavailable.
+	for k, current := range buckets {
+		if current.RSSMB == 0 {
+			current.RSSMB = procRSS[k]
+			current.WorkingSetMB = procRSS[k]
 		}
 	}
 

@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"os"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -14,18 +15,20 @@ import (
 )
 
 type platformCollector struct {
-	prevIdle         uint64
-	prevTotal        uint64
-	prevProcTicks    map[int]uint64
-	prevProcSample   time.Time
-	podLookup        PodLookup
-	kernelEvents     *kernelEventTracker
+	prevIdle       uint64
+	prevTotal      uint64
+	prevProcTicks  map[int]uint64
+	prevProcSample time.Time
+	podLookup      PodLookup
+	kernelEvents   *kernelEventTracker
+	stackSampler   StackSampler
 }
 
 func newPlatformCollector(lookup PodLookup) Collector {
 	return &platformCollector{
 		podLookup:    lookup,
 		kernelEvents: newKernelEventTracker(),
+		stackSampler: NewStackSampler(),
 	}
 }
 
@@ -45,8 +48,12 @@ func (c *platformCollector) Snapshot(flows *store.FlowStore) Snapshot {
 	memDetail := readMemoryDetail()
 	processes, procSamples := c.collectProcessSamples(15)
 	topPods := aggregateTopPods(processes, procSamples, 8)
+	// Cgroup walk is expensive; only use it when process→pod attribution found nothing.
+	if len(topPods) == 0 {
+		topPods = c.collectPodsFromCgroups(16)
+	}
 	kernelMem := readKernelMemory(memDetail, memUsed, memTotal)
-	cpuStack, stackSource := buildCPUStack(processes, network)
+	cpuStack, stackSource := buildCPUStack(processes, network, c.stackSampler)
 	kernelFrames := kernelFrameLabels(cpuStack, stackSource)
 	hotspots := buildKernelHotspots(processes, network, kernelFrames, stackSource)
 	oomDelta := c.kernelEvents.observeOOMKill()
@@ -227,4 +234,60 @@ func mergeTimelineEvents(kernel, base []TimelineEvent) []TimelineEvent {
 		merged = merged[:20]
 	}
 	return merged
+}
+
+func mergePodConsumers(primary, secondary []PodConsumer) []PodConsumer {
+	type key struct {
+		namespace string
+		pod       string
+	}
+	out := map[key]PodConsumer{}
+	for _, pod := range primary {
+		out[key{namespace: pod.Namespace, pod: pod.Pod}] = pod
+	}
+	for _, pod := range secondary {
+		k := key{namespace: pod.Namespace, pod: pod.Pod}
+		current, ok := out[k]
+		if !ok {
+			out[k] = pod
+			continue
+		}
+		if current.RSSMB == 0 {
+			current.RSSMB = pod.RSSMB
+		}
+		if current.WorkingSetMB == 0 {
+			current.WorkingSetMB = pod.WorkingSetMB
+		}
+		if current.AnonymousMB == 0 {
+			current.AnonymousMB = pod.AnonymousMB
+		}
+		if current.CacheMB == 0 {
+			current.CacheMB = pod.CacheMB
+		}
+		if current.MajorFaults == 0 {
+			current.MajorFaults = pod.MajorFaults
+			current.PageFaults = pod.PageFaults
+		}
+		if current.MinorFaults == 0 {
+			current.MinorFaults = pod.MinorFaults
+		}
+		if current.MemoryLimitMB == 0 {
+			current.MemoryLimitMB = pod.MemoryLimitMB
+		}
+		if pod.CPUPercent > current.CPUPercent {
+			current.CPUPercent = pod.CPUPercent
+		}
+		out[k] = current
+	}
+	items := make([]PodConsumer, 0, len(out))
+	for _, pod := range out {
+		items = append(items, pod)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].RSSMB > items[j].RSSMB
+	})
+	if len(items) > 16 {
+		items = items[:16]
+	}
+	return items
 }
