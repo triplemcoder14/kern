@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,8 +16,13 @@ import (
 var (
 	stackLinePattern = regexp.MustCompile(`^\[<([0-9a-fA-F]+)>\]\s*(.+)$`)
 	kallsymsOnce     sync.Once
-	kallsymsLookup   map[uint64]string
+	kallsymsSorted   []kallsymEntry
 )
+
+type kallsymEntry struct {
+	addr uint64
+	name string
+}
 
 func readProcessKernelStack(pid int, limit int) []string {
 	if pid <= 0 || limit <= 0 {
@@ -73,19 +79,36 @@ func parseKernelStackLine(line string) string {
 
 func lookupKallsym(addr uint64) string {
 	kallsymsOnce.Do(loadKallsyms)
-	if len(kallsymsLookup) == 0 {
+	if len(kallsymsSorted) == 0 {
 		return ""
 	}
 
-	bestAddr := uint64(0)
-	bestName := ""
-	for symbolAddr, name := range kallsymsLookup {
-		if symbolAddr <= addr && symbolAddr >= bestAddr {
-			bestAddr = symbolAddr
-			bestName = name
-		}
+	// Largest symbol address <= addr (standard kallsyms nearest-lower).
+	i := sort.Search(len(kallsymsSorted), func(i int) bool {
+		return kallsymsSorted[i].addr > addr
+	}) - 1
+	if i < 0 {
+		return ""
 	}
-	return bestName
+	return kallsymsSorted[i].name
+}
+
+func resolveStackAddrs(addrs []uint64) []string {
+	if len(addrs) == 0 {
+		return nil
+	}
+	frames := make([]string, 0, len(addrs))
+	for _, addr := range addrs {
+		if addr == 0 {
+			break
+		}
+		name := lookupKallsym(addr)
+		if name == "" {
+			name = "0x" + strconv.FormatUint(addr, 16)
+		}
+		frames = append(frames, name)
+	}
+	return frames
 }
 
 func loadKallsyms() {
@@ -95,18 +118,23 @@ func loadKallsyms() {
 	}
 	defer file.Close()
 
-	lookup := make(map[uint64]string, 4096)
+	entries := make([]kallsymEntry, 0, 65536)
 	scanner := bufio.NewScanner(file)
+	buf := make([]byte, 0, 1024*1024)
+	scanner.Buffer(buf, 1024*1024)
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
 		if len(fields) < 3 {
 			continue
 		}
 		addr, err := strconv.ParseUint(fields[0], 16, 64)
-		if err != nil {
+		if err != nil || addr == 0 {
 			continue
 		}
-		lookup[addr] = fields[2]
+		entries = append(entries, kallsymEntry{addr: addr, name: fields[2]})
 	}
-	kallsymsLookup = lookup
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].addr < entries[j].addr
+	})
+	kallsymsSorted = entries
 }
