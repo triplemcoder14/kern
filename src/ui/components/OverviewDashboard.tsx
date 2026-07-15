@@ -120,8 +120,7 @@ export function OverviewDashboard({
         <div className="overview-quick-nav">
           {(
             [
-              ["topology", "topology", "Topology"],
-              ["flows", "flows", "Flows"],
+              ["network", "network", "Network"],
               ["workloads", "workloads", "Workloads"],
               ["profiling", "profiling", "Profiling"],
               ["alerts", "alerts", "Alerts"],

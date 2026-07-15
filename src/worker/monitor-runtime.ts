@@ -42,6 +42,7 @@ import {
   trimMonitorEvents,
 } from "../core/monitoring/retention";
 import {
+  ALL_NAMESPACES,
   pollIntervalMs,
   type MonitorNamespaceScope,
 } from "../core/monitoring/scope";
@@ -114,7 +115,10 @@ export class MonitorRuntime {
   private watchAbort: AbortController | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private connected = false;
-  private activeNamespace: MonitorNamespaceScope = "default";
+  private activeNamespace: MonitorNamespaceScope = ALL_NAMESPACES;
+  private inventoryPodCount = 0;
+  private inventoryRunningPods = 0;
+  private inventoryFailedPods = 0;
   private eventTimestamps: number[] = [];
   private knownNamespaces: string[] = [];
   private networkEngine = new NetworkEngine();
@@ -251,12 +255,33 @@ export class MonitorRuntime {
 
     this.client = new K8sApiClient(this.config);
     await this.client.ping();
+
+    // Prefer live cluster identity over a stale saved label (e.g. "minikube" after switching contexts).
+    const detectedName = await this.client.detectClusterDisplayName();
+    const placeholderNames = new Set([
+      "minikube",
+      "local-cluster",
+      "cluster",
+      "default",
+      "docker-desktop",
+      "docker-for-desktop",
+      "kubernetes",
+    ]);
+    if (
+      detectedName &&
+      (!displayName || placeholderNames.has(displayName.toLowerCase()) || displayName === "minikube")
+    ) {
+      this.config = { ...this.config, name: detectedName };
+    }
+
     await this.refreshNamespaces();
 
     await this.refreshAlertRules();
 
     this.connected = true;
 
+    // Keep UI + runtime on the same scope (UI defaults to All namespaces).
+    this.activeNamespace = ALL_NAMESPACES;
     this.networkEngine.configure(ebpfCollectorUrl, origin);
     this.networkEngine.setScope(this.activeNamespace);
     this.networkEngine.onRefreshError((message) => {
@@ -313,6 +338,10 @@ export class MonitorRuntime {
     this.lastNetworkSnapshot = null;
     this.declarativeAlertRules = [];
     this.connected = false;
+    this.inventoryPodCount = 0;
+    this.inventoryRunningPods = 0;
+    this.inventoryFailedPods = 0;
+    this.activeNamespace = ALL_NAMESPACES;
     this.config = null;
     this.client = null;
     this.knownNamespaces = [];
@@ -363,6 +392,9 @@ export class MonitorRuntime {
       this.client.listPods(this.activeNamespace),
     ]);
 
+    this.updateInventoryCounts(pods);
+    await this.reconcileStaleIncidents(pods);
+
     const sorted = eventList.items
       .map(eventFromK8sEvent)
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
@@ -386,16 +418,17 @@ export class MonitorRuntime {
       events: this.events,
       incidents: [...this.incidents.values()],
     });
+    this.emitHealth();
   }
 
   private setNamespace(namespace: string): { namespace: string } {
-    const next = namespace.trim() || "default";
+    const next = (namespace.trim() || ALL_NAMESPACES) as MonitorNamespaceScope;
     if (next === this.activeNamespace) {
       return { namespace: next };
     }
     this.activeNamespace = next;
     this.networkEngine.setScope(next);
-    if (next !== "all") {
+    if (next !== ALL_NAMESPACES) {
       this.events = this.events.filter(
         (event) => !event.namespace || event.namespace === next,
       );
@@ -551,6 +584,8 @@ export class MonitorRuntime {
 
     try {
       const pods = await this.client.listPods(this.activeNamespace);
+      this.updateInventoryCounts(pods);
+      await this.reconcileStaleIncidents(pods);
       for (const pod of pods) {
         const failure = eventFromPodFailure(pod);
         if (failure) {
@@ -561,6 +596,64 @@ export class MonitorRuntime {
     } catch (error) {
       const message = error instanceof Error ? error.message : "Pod poll failed";
       this.emit({ type: "ERROR", message });
+    }
+  }
+
+  private updateInventoryCounts(
+    pods: Array<{
+      status?: {
+        phase?: string;
+        containerStatuses?: Array<{ ready?: boolean; state?: Record<string, unknown> }>;
+      };
+    }>,
+  ): void {
+    this.inventoryPodCount = pods.length;
+    this.inventoryRunningPods = pods.filter((pod) => (pod.status?.phase ?? "") === "Running").length;
+    this.inventoryFailedPods = pods.filter((pod) => {
+      const phase = pod.status?.phase ?? "";
+      if (phase === "Failed") {
+        return true;
+      }
+      return (pod.status?.containerStatuses ?? []).some((status) => {
+        const waiting = status.state?.waiting as { reason?: string } | undefined;
+        return waiting?.reason === "CrashLoopBackOff" || waiting?.reason === "ImagePullBackOff";
+      });
+    }).length;
+  }
+
+  private async reconcileStaleIncidents(
+    pods: Array<{ metadata?: { name?: string; namespace?: string } }>,
+  ): Promise<void> {
+    const living = new Set(
+      pods
+        .map((pod) => {
+          const name = pod.metadata?.name?.trim();
+          const namespace = pod.metadata?.namespace?.trim();
+          return name && namespace ? `${namespace}/${name}` : "";
+        })
+        .filter(Boolean),
+    );
+
+    for (const [id, incident] of this.incidents) {
+      if (incident.status !== "open") {
+        continue;
+      }
+      const kind = (incident.resourceKind ?? "").toLowerCase();
+      if (kind !== "pod" || !incident.resourceName || !incident.namespace) {
+        continue;
+      }
+      const key = `${incident.namespace}/${incident.resourceName}`;
+      if (living.has(key)) {
+        continue;
+      }
+      const resolved: Incident = {
+        ...incident,
+        status: "resolved",
+        updatedAt: new Date().toISOString(),
+      };
+      this.incidents.set(id, resolved);
+      this.persistLater(() => this.persistence.resolveIncidentInDb(id));
+      this.emit({ type: "INCIDENT_RESOLVED", incidentId: id });
     }
   }
 
@@ -686,14 +779,22 @@ export class MonitorRuntime {
     const podNodes = snapshot.topology.nodes.filter((node) => node.kind === "Pod");
     const serviceNodes = snapshot.topology.nodes.filter((node) => node.kind === "Service");
 
+    // Prefer live Kubernetes inventory so Overview matches the selected namespace scope.
+    // Topology alone can lag / miss pods when flows haven't seen them yet.
+    const podCount = Math.max(this.inventoryPodCount, podNodes.length);
+    const runningPods =
+      this.inventoryPodCount > 0 ? this.inventoryRunningPods : podNodes.filter((node) => node.status === "healthy").length;
+    const failedPods =
+      this.inventoryPodCount > 0 ? this.inventoryFailedPods : podNodes.filter((node) => node.status === "degraded").length;
+
     return {
       health,
       connected: this.connected,
       clusterName: this.connected ? this.config?.name?.trim() || "Connected" : "Not connected",
-      podCount: podNodes.length,
-      runningPods: podNodes.filter((node) => node.status === "healthy").length,
-      failedPods: podNodes.filter((node) => node.status === "degraded").length,
-      serviceCount: serviceNodes.length,
+      podCount,
+      runningPods,
+      failedPods,
+      serviceCount: Math.max(serviceNodes.length, 0),
       openIncidents: openIncidents.length,
       eventsPerMinute: this.eventTimestamps.length,
     };
@@ -832,15 +933,15 @@ export class MonitorRuntime {
         agentProfiles: new Map(),
         nodeMetrics,
         podMetrics: [],
-        namespaceScope: this.activeNamespace,
       });
     }
 
-    const [nodesResult, pods, agentProfiles, podMetrics] = await Promise.all([
+    const [nodesResult, pods, agentProfiles, podMetrics, podStats] = await Promise.all([
       this.client.listNodes().catch(() => []),
       this.client.listPodsOnNode(selectedNode, this.activeNamespace).catch(() => []),
       this.fetchAgentProfilesForNode(selectedNode),
       this.client.listPodMetrics(this.activeNamespace).catch(() => []),
+      this.client.listNodePodMemoryStats(selectedNode).catch(() => []),
     ]);
 
     let nodes = nodesResult;
@@ -856,7 +957,7 @@ export class MonitorRuntime {
       agentProfiles,
       nodeMetrics,
       podMetrics,
-      namespaceScope: this.activeNamespace,
+      podStats,
       selectedNode,
     });
   }

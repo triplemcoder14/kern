@@ -344,7 +344,7 @@ export function SettingsView({
           <div className="settings-fields">
             <SettingsField
               label="Cluster name"
-              hint="Shown in the console (e.g. ocp-uat, prod-east)"
+              hint="Optional — auto-detected from the live cluster when left blank"
             >
               <input
                 value={config.clusterName}
@@ -354,8 +354,7 @@ export function SettingsView({
                 }}
                 className="settings-input"
                 disabled={connected}
-                placeholder="My cluster"
-                required
+                placeholder="Auto-detect from nodes"
               />
             </SettingsField>
 
@@ -380,12 +379,12 @@ export function SettingsView({
                 className="settings-btn settings-btn-primary"
                 disabled={busy}
                 onClick={() => {
-                  if (!config.clusterName.trim()) {
-                    setLocalError("Cluster name is required.");
-                    return;
-                  }
                   setLocalError(null);
-                  void onConnect(config);
+                  const next = {
+                    ...config,
+                    clusterName: config.clusterName.trim() || "cluster",
+                  };
+                  void onConnect(next);
                 }}
               >
                 {busy ? "Connecting…" : "Connect"}

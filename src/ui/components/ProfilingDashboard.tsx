@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { flameColor, flameShareTone } from "../../core/network/flame-colors";
 import type {
   KernelHotspot,
   NodeHealth,
@@ -12,10 +13,10 @@ import type {
 } from "../../core/types/profiling";
 import { PageHeader } from "./PageHeader";
 import { useNodeProfile } from "../hooks/useNodeProfile";
-import { HotPathStack } from "./profiler/HotPathStack";
+import { MemoryWorkspace } from "./memory/MemoryWorkspace";
 import { InsightCards } from "./profiler/InsightCards";
 import { InvestigationPanel, type InvestigationTarget } from "./profiler/InvestigationPanel";
-import { NetworkFlameStack } from "./profiler/NetworkFlameStack";
+import { TraceFlameStack } from "./profiler/TraceFlameStack";
 
 interface ProfilingDashboardProps {
   clusterName: string;
@@ -27,25 +28,55 @@ interface ProfilingDashboardProps {
 
 type ProfilerTab = "overview" | "cpu" | "memory" | "network" | "timeline";
 
-function stackSourceBanner(source?: ProfileStackSource): string {
-  if (source === "proc") {
-    return "Live PSI and memory from the agent. CPU kernel stacks sampled from /proc/PID/stack on the top process.";
+function stackSourceBanner(source?: ProfileStackSource, hasCpuFrames?: boolean): string {
+  if (source === "ebpf" && hasCpuFrames) {
+    return "Live PSI and memory from the agent. CPU flame stacks from eBPF sampling.";
   }
-  if (source === "ebpf") {
-    return "Live PSI and memory from the agent. CPU stacks from eBPF perf sampling.";
+  if (source === "proc" && hasCpuFrames) {
+    return "Live PSI and memory from the agent. CPU stacks sampled from /proc.";
   }
-  return "Live PSI and memory from the agent. CPU stacks and kernel functions are inferred until eBPF sampling lands.";
+  if (source === "ebpf" && !hasCpuFrames) {
+    return "Live PSI and memory from the agent. eBPF sampler is attached — waiting for the first CPU stack frames.";
+  }
+  return "Live PSI and memory from the agent. Waiting for eBPF stack samples on this node.";
 }
 
 function cpuStackLabel(source?: ProfileStackSource): string {
-  if (source === "proc") {
-    return "CPU hot path (/proc stack)";
-  }
   if (source === "ebpf") {
-    return "CPU hot path (eBPF)";
+    return "Node performance flamegraph (eBPF)";
   }
-  return "CPU hot path (inferred)";
+  if (source === "proc") {
+    return "Node performance flamegraph (/proc)";
+  }
+  return "Node performance flamegraph";
 }
+
+/** Keep root + frames belonging to pods in the selected Kubernetes namespace. */
+function scopeCpuFrames<T extends { depth: number; offset: number; width: number; namespace?: string; label: string }>(
+  frames: T[],
+  namespace: string,
+): T[] {
+  if (!namespace || namespace === "all") {
+    return frames;
+  }
+  const pods = frames.filter(
+    (frame) => frame.depth === 1 && frame.namespace === namespace,
+  );
+  if (pods.length === 0) {
+    return frames.filter((frame) => frame.depth === 0 || frame.label === "all");
+  }
+  return frames.filter((frame) => {
+    if (frame.depth === 0 || frame.label === "all") {
+      return true;
+    }
+    return pods.some(
+      (pod) =>
+        frame.offset >= pod.offset - 0.0001 &&
+        frame.offset + frame.width <= pod.offset + pod.width + 0.0001,
+    );
+  });
+}
+
 
 function healthLabel(health: NodeHealth): string {
   if (health === "ok") {
@@ -83,7 +114,7 @@ function Sparkline({ values, tone }: { values: number[]; tone?: string }) {
 
 function PodTable({ pods, onSelect }: { pods: PodConsumer[]; onSelect: (target: InvestigationTarget) => void }) {
   if (pods.length === 0) {
-    return <div className="profile-log-empty">No pod memory consumers from agent yet.</div>;
+    return <div className="profile-log-empty">No memory consumers on this node yet.</div>;
   }
 
   return (
@@ -170,64 +201,34 @@ function HotspotList({
   return (
     <div className="profile-hotspots">
       <span className="profile-panel-label">Top kernel functions</span>
-      {hotspots.map((hotspot) => (
-        <button
-          key={hotspot.function}
-          type="button"
-          className="profile-hotspot-row profile-hotspot-row-button"
-          onClick={() =>
-            onSelect({
-              kind: "kernel",
-              function: hotspot.function,
-              share: hotspot.share,
-              meaning: hotspot.meaning,
-            })
-          }
-        >
-          <span className="profile-hotspot-fn">{hotspot.function}</span>
-          <span className="profile-hotspot-share">{(hotspot.share * 100).toFixed(0)}%</span>
-          <span className="profile-hotspot-meaning">{hotspot.meaning ?? "Kernel path"}</span>
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function MemoryMapBar({
-  usedMb,
-  totalMb,
-  cacheMb,
-  slabMb,
-}: {
-  usedMb?: number;
-  totalMb?: number;
-  cacheMb?: number;
-  slabMb?: number;
-}) {
-  if (!totalMb || totalMb <= 0) {
-    return null;
-  }
-  const usedPct = Math.min(100, ((usedMb ?? 0) / totalMb) * 100);
-  const cachePct = Math.min(100 - usedPct, ((cacheMb ?? 0) / totalMb) * 100);
-  const slabPct = Math.min(100 - usedPct - cachePct, ((slabMb ?? 0) / totalMb) * 100);
-
-  return (
-    <div className="profile-memory-map">
-      <div className="profile-memory-map-head">
-        <strong>{Math.round(totalMb / 1024)} GB node memory</strong>
-        <span>{usedMb ?? 0} / {totalMb} MB used</span>
-      </div>
-      <div className="profile-memory-map-bar" aria-hidden>
-        <span className="profile-memory-seg profile-memory-rss" style={{ width: `${usedPct}%` }} />
-        <span className="profile-memory-seg profile-memory-cache" style={{ width: `${cachePct}%` }} />
-        <span className="profile-memory-seg profile-memory-slab" style={{ width: `${slabPct}%` }} />
-      </div>
-      <div className="profile-memory-map-legend">
-        <span>RSS</span>
-        <span>Cache</span>
-        <span>Slab</span>
-        <span>Free</span>
-      </div>
+      {hotspots.map((hotspot) => {
+        const pct = hotspot.share * 100;
+        const tone = flameShareTone(pct);
+        return (
+          <button
+            key={hotspot.function}
+            type="button"
+            className="profile-hotspot-row profile-hotspot-row-button"
+            onClick={() =>
+              onSelect({
+                kind: "kernel",
+                function: hotspot.function,
+                share: hotspot.share,
+                meaning: hotspot.meaning,
+              })
+            }
+          >
+            <span className="profile-hotspot-fn">{hotspot.function}</span>
+            <span
+              className={`profile-hotspot-share profile-hotspot-share-${tone}`}
+              style={{ color: flameColor(Math.min(1, hotspot.share * 2.2)) }}
+            >
+              {pct.toFixed(0)}%
+            </span>
+            <span className="profile-hotspot-meaning">{hotspot.meaning ?? "Kernel path"}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -299,6 +300,56 @@ export function ProfilingDashboard({
   const detail = profile.selected;
   const selectedStackLabel = investigationTarget?.kind === "stack" ? investigationTarget.label : undefined;
 
+  const scopedPods = useMemo(() => {
+    if (!detail) {
+      return [];
+    }
+    if (!namespace || namespace === "all") {
+      return detail.topPods;
+    }
+    return detail.topPods.filter((pod) => pod.namespace === namespace);
+  }, [detail, namespace]);
+
+  const scopedContainers = useMemo(() => {
+    if (!detail) {
+      return [];
+    }
+    const containers = detail.topContainers ?? [];
+    if (!namespace || namespace === "all") {
+      return containers;
+    }
+    return containers.filter((container) => container.namespace === namespace);
+  }, [detail, namespace]);
+
+  const scopedProcesses = useMemo(() => {
+    if (!detail) {
+      return [];
+    }
+    if (!namespace || namespace === "all") {
+      return detail.topProcesses;
+    }
+    return detail.topProcesses.filter((proc) => proc.namespace === namespace);
+  }, [detail, namespace]);
+
+  const scopedCpuStack = useMemo(() => {
+    if (!detail) {
+      return [];
+    }
+    return scopeCpuFrames(detail.cpuStack, namespace);
+  }, [detail, namespace]);
+
+  const scopedNetworkStack = useMemo(() => {
+    if (!detail) {
+      return [];
+    }
+    if (!namespace || namespace === "all") {
+      return detail.stack;
+    }
+    return detail.stack.filter(
+      (frame) => frame.depth <= 1 || frame.namespace === namespace,
+    );
+  }, [detail, namespace]);
+
   const subtitle = useMemo(() => {
     if (!connected) {
       return "Connect a cluster to investigate node kernel behavior";
@@ -340,7 +391,7 @@ export function ProfilingDashboard({
         <div className="profile-layout profile-layout-investigation">
           <aside className="profile-nodes panel">
             <div className="panel-header">Cluster nodes</div>
-            <div className="profile-nodes-list">
+            <div className="profile-nodes-list" role="listbox" aria-label="Cluster nodes">
               {profile.nodes.length === 0 ? (
                 <p className="profile-nodes-empty">{loading ? "Loading nodes…" : "No nodes found"}</p>
               ) : (
@@ -348,6 +399,8 @@ export function ProfilingDashboard({
                   <button
                     key={node.name}
                     type="button"
+                    role="option"
+                    aria-selected={activeNode === node.name}
                     className={`profile-node${activeNode === node.name ? " profile-node-active" : ""}`}
                     onClick={() => {
                       setSelectedNode(node.name);
@@ -355,8 +408,8 @@ export function ProfilingDashboard({
                     }}
                   >
                     <span className="profile-node-row">
-                      <span className={`profile-health profile-health-${node.health}`} />
-                      {node.name}
+                      <span className={`profile-health profile-health-${node.health}`} aria-hidden />
+                      <span className="profile-node-name">{node.name}</span>
                       {node.agentLive ? <span className="profile-node-live">live</span> : null}
                     </span>
                     <span className={`profile-node-meta profile-node-meta-${node.health}`}>
@@ -403,7 +456,7 @@ export function ProfilingDashboard({
                 </div>
 
                 <div className="profile-inferred-banner">
-                  {stackSourceBanner(detail.stackSource)}
+                  {stackSourceBanner(detail.stackSource, scopedCpuStack.length > 0)}
                 </div>
 
                 <div className="profile-tabs" role="tablist">
@@ -424,9 +477,10 @@ export function ProfilingDashboard({
                 {activeTab === "overview" ? (
                   <>
                     <InsightCards detail={detail} onSelect={setInvestigationTarget} />
-                    <HotPathStack
-                      frames={detail.cpuStack}
+                    <TraceFlameStack
+                      frames={scopedCpuStack}
                       label={cpuStackLabel(detail.stackSource)}
+                      variant="cpu"
                       onSelect={setInvestigationTarget}
                       selectedLabel={selectedStackLabel}
                     />
@@ -436,63 +490,33 @@ export function ProfilingDashboard({
 
                 {activeTab === "cpu" ? (
                   <>
-                    <HotPathStack
-                      frames={detail.cpuStack}
-                      label="CPU hot path"
+                    <TraceFlameStack
+                      frames={scopedCpuStack}
+                      label={cpuStackLabel(detail.stackSource)}
+                      variant="cpu"
                       onSelect={setInvestigationTarget}
                       selectedLabel={selectedStackLabel}
                     />
                     <HotspotList hotspots={detail.kernelHotspots} onSelect={setInvestigationTarget} />
                     <div className="profile-overview-card profile-overview-wide">
                       <span className="profile-panel-label">Top pods</span>
-                      <PodTable pods={detail.topPods} onSelect={setInvestigationTarget} />
+                      <PodTable pods={scopedPods} onSelect={setInvestigationTarget} />
                       <span className="profile-panel-label">Processes</span>
-                      <ProcessTable processes={detail.topProcesses} onSelect={setInvestigationTarget} />
+                      <ProcessTable processes={scopedProcesses} onSelect={setInvestigationTarget} />
                     </div>
                   </>
                 ) : null}
 
                 {activeTab === "memory" ? (
-                  <>
-                    <MemoryMapBar
-                      usedMb={detail.memoryUsedMb}
-                      totalMb={detail.memoryTotalMb}
-                      cacheMb={detail.memoryDetail.cacheMb}
-                      slabMb={detail.memoryDetail.slabMb}
-                    />
-                    <div className="profile-memory-grid">
-                      <div className="profile-overview-card">
-                        <span className="profile-panel-label">Pressure</span>
-                        <div className="profile-kv">
-                          <span>Memory PSI</span>
-                          <span>{psiBadge(detail.psi.memoryLevel)}</span>
-                        </div>
-                        <div className="profile-kv">
-                          <span>Major faults/min</span>
-                          <span>{detail.memoryDetail.majorFaultsPerMin ?? "—"}</span>
-                        </div>
-                        <div className="profile-kv">
-                          <span>Swap used</span>
-                          <span>{detail.memoryDetail.swapUsedMb !== undefined ? `${detail.memoryDetail.swapUsedMb} MB` : "—"}</span>
-                        </div>
-                        <div className="profile-kv">
-                          <span>Reclaim</span>
-                          <span>{detail.memoryDetail.reclaimActivity ?? "—"}</span>
-                        </div>
-                      </div>
-                      <div className="profile-overview-card">
-                        <span className="profile-panel-label">Kernel memory health</span>
-                        <div className="profile-kv"><span>Slab growth</span><span>{detail.kernelMemory.slabGrowth ?? "—"}</span></div>
-                        <div className="profile-kv"><span>Dentry cache</span><span>{detail.kernelMemory.dentryCache ?? "—"}</span></div>
-                        <div className="profile-kv"><span>TCP buffers</span><span>{detail.kernelMemory.tcpBuffers ?? "—"}</span></div>
-                        <div className="profile-kv"><span>Page reclaim</span><span>{detail.kernelMemory.pageReclaim ?? "—"}</span></div>
-                      </div>
-                      <div className="profile-overview-card profile-overview-wide">
-                        <span className="profile-panel-label">Top memory pods</span>
-                        <PodTable pods={detail.topPods} onSelect={setInvestigationTarget} />
-                      </div>
-                    </div>
-                  </>
+                  <MemoryWorkspace
+                    detail={detail}
+                    pods={scopedPods}
+                    containers={scopedContainers}
+                    processes={scopedProcesses}
+                    namespace={namespace}
+                    onInvestigate={setInvestigationTarget}
+                    investigationTarget={investigationTarget}
+                  />
                 ) : null}
 
                 {activeTab === "network" ? (
@@ -508,7 +532,7 @@ export function ProfilingDashboard({
                         </div>
                       ))}
                     </div>
-                    <NetworkFlameStack frames={detail.stack} label="Network flame stack" />
+                    <TraceFlameStack frames={scopedNetworkStack} label="Network flame graph" variant="network" />
                     <NetworkLog lines={detail.log} />
                   </>
                 ) : null}

@@ -34,7 +34,12 @@ export function loadClusterConfig(): ClusterConfig {
       ...DEFAULT_CLUSTER_CONFIG,
       ...parsed,
       clusterName:
-        parsed.clusterName === "minikube" ? "" : (parsed.clusterName ?? DEFAULT_CLUSTER_CONFIG.clusterName),
+        parsed.clusterName === "minikube" ||
+        parsed.clusterName === "kubernetes" ||
+        parsed.clusterName === "local-cluster" ||
+        parsed.clusterName === "docker-desktop"
+          ? ""
+          : (parsed.clusterName ?? DEFAULT_CLUSTER_CONFIG.clusterName),
     };
   } catch {
     return DEFAULT_CLUSTER_CONFIG;

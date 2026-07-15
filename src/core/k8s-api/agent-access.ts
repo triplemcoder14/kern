@@ -61,3 +61,41 @@ export async function fetchAgentViaPodProxy(
 
   return null;
 }
+
+/** Pull the same path from every agent pod and return successful JSON bodies. */
+export async function fetchAllAgentJson<T>(
+  client: K8sApiClient,
+  path: string,
+  options: { port?: number; timeoutMs?: number; maxPods?: number } = {},
+): Promise<Array<{ body: T; pod: { namespace: string; name: string; nodeName: string } }>> {
+  const port = options.port ?? DEFAULT_AGENT_PORT;
+  const timeoutMs = options.timeoutMs ?? 5_000;
+  const maxPods = options.maxPods ?? 16;
+  const pods = await listAgentPods(client);
+  const results: Array<{ body: T; pod: { namespace: string; name: string; nodeName: string } }> = [];
+
+  await Promise.all(
+    pods.slice(0, maxPods).map(async (pod) => {
+      try {
+        const response = await client.fetchPodProxy(
+          pod.namespace,
+          pod.name,
+          port,
+          path,
+          timeoutMs,
+        );
+        if (!response.ok) {
+          return;
+        }
+        results.push({
+          body: (await response.json()) as T,
+          pod,
+        });
+      } catch {
+        // skip unreachable agents
+      }
+    }),
+  );
+
+  return results;
+}
