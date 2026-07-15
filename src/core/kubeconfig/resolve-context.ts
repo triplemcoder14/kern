@@ -22,6 +22,7 @@ const PLACEHOLDER_CLUSTER_NAMES = new Set([
   "default",
   "docker-desktop",
   "docker-for-desktop",
+  "kubernetes",
 ]);
 
 const LOCAL_CLUSTER_SERVERS = [

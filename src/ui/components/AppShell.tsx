@@ -57,28 +57,6 @@ function IconOverview(props: SVGProps<SVGSVGElement>) {
   );
 }
 
-function IconTopology(props: SVGProps<SVGSVGElement>) {
-  return (
-    <svg viewBox="0 0 20 20" fill="none" aria-hidden {...props}>
-      <circle cx="10" cy="10" r="2.2" stroke="currentColor" strokeWidth="1.4" />
-      <circle cx="4" cy="5" r="1.8" stroke="currentColor" strokeWidth="1.4" />
-      <circle cx="16" cy="5" r="1.8" stroke="currentColor" strokeWidth="1.4" />
-      <circle cx="4" cy="15" r="1.8" stroke="currentColor" strokeWidth="1.4" />
-      <circle cx="16" cy="15" r="1.8" stroke="currentColor" strokeWidth="1.4" />
-      <path d="M5.6 6.2 8.2 8.6M14.4 6.2 11.8 8.6M5.6 13.8 8.2 11.4M14.4 13.8 11.8 11.4" stroke="currentColor" strokeWidth="1.2" />
-    </svg>
-  );
-}
-
-function IconFlows(props: SVGProps<SVGSVGElement>) {
-  return (
-    <svg viewBox="0 0 20 20" fill="none" aria-hidden {...props}>
-      <path d="M3 10h10M11 10l-3-3M11 10l-3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-      <path d="M13 6h4M13 10h4M13 14h4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" opacity="0.55" />
-    </svg>
-  );
-}
-
 function IconNetwork(props: SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 20 20" fill="none" aria-hidden {...props}>
@@ -185,10 +163,8 @@ function IconSettings(props: SVGProps<SVGSVGElement>) {
 
 const PRIMARY_NAV: NavItem[] = [
   { id: "overview", page: "overview", label: "Overview", Icon: IconOverview },
-  { id: "topology", page: "topology", label: "Topology", Icon: IconTopology },
-  { id: "flows", page: "flows", label: "Flows", Icon: IconFlows },
-  { id: "workloads", page: "workloads", label: "Workloads", Icon: IconWorkloads },
   { id: "network", page: "network", label: "Network", Icon: IconNetwork },
+  { id: "workloads", page: "workloads", label: "Workloads", Icon: IconWorkloads },
   { id: "profiling", page: "profiling", label: "Profiling", Icon: IconProfiling },
   { id: "alerts", page: "alerts", label: "Alerts", Icon: IconAlerts },
   { id: "events", page: "events", label: "Events", Icon: IconEvents },

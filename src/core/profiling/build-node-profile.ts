@@ -1,11 +1,18 @@
-import type { K8sNodeResourceMetrics, K8sNodeSummary } from "../k8s-api/client";
+import type {
+  K8sNodeResourceMetrics,
+  K8sNodeSummary,
+  K8sPodMemoryStat,
+  K8sPodMetricSummary,
+} from "../k8s-api/client";
 import type { MonitorEvent } from "../types/monitoring";
 import type { NetworkFlow, NetworkSnapshot } from "../types/network";
 import type {
   AgentProfilePayload,
+  ContainerConsumer,
   KernelHotspot,
   KernelMemory,
   MemoryDetail,
+  MemoryRssSource,
   NodeHealth,
   NodeProfileDetail,
   NodeProfileSummary,
@@ -74,8 +81,14 @@ function mapTopPods(agent?: AgentProfilePayload): PodConsumer[] {
     pod: pod.pod,
     cpuPercent: pod.cpu_percent,
     rssMb: pod.rss_mb,
+    workingSetMb: pod.working_set_mb,
+    anonymousMb: pod.anonymous_mb,
     cacheMb: pod.cache_mb,
+    majorFaults: pod.major_faults ?? pod.page_faults_per_min,
+    minorFaults: pod.minor_faults,
     pageFaultsPerMin: pod.page_faults_per_min,
+    memoryLimitMb: pod.memory_limit_mb,
+    rssSource: pod.rss_mb !== undefined ? ("cgroup" as const) : undefined,
   }));
 }
 
@@ -88,6 +101,272 @@ function mapTopProcesses(agent?: AgentProfilePayload): ProcessSample[] {
     cpuPercent: proc.cpu_percent,
     rssMb: proc.rss_mb,
   }));
+}
+
+const previousRssByKey = new Map<string, number>();
+
+function attachGrowth<T>(
+  items: T[],
+  keyOf: (item: T) => string,
+  rssOf: (item: T) => number | undefined,
+): Array<T & { growthMb?: number }> {
+  return items.map((item) => {
+    const key = keyOf(item);
+    const rss = rssOf(item);
+    const prev = previousRssByKey.get(key);
+    const growthMb = prev !== undefined && rss !== undefined ? rss - prev : undefined;
+    if (rss !== undefined) {
+      previousRssByKey.set(key, rss);
+    }
+    return { ...item, growthMb };
+  });
+}
+
+function kiToMb(ki?: number): number | undefined {
+  if (ki === undefined) {
+    return undefined;
+  }
+  return Math.max(0, Math.round(ki / 1024));
+}
+
+function enrichPodWithMetrics(
+  pod: PodConsumer,
+  metricsByKey: Map<string, K8sPodMetricSummary>,
+  statsByKey: Map<string, K8sPodMemoryStat>,
+  limitByKey: Map<string, number | undefined>,
+): PodConsumer {
+  const key = `${pod.namespace}/${pod.pod}`;
+  const metric = metricsByKey.get(key);
+  const stats = statsByKey.get(key);
+  const metricsMb = kiToMb(metric?.memoryUsedKi);
+  const limitMb = pod.memoryLimitMb ?? limitByKey.get(key);
+
+  let rssMb = pod.rssMb ?? stats?.rssMb;
+  let workingSetMb = pod.workingSetMb ?? stats?.workingSetMb ?? metricsMb;
+  let rssSource: MemoryRssSource | undefined = pod.rssSource;
+
+  if (rssMb === undefined && workingSetMb !== undefined) {
+    rssMb = workingSetMb;
+    rssSource = stats ? "metrics" : metricsMb !== undefined ? "metrics" : rssSource;
+  } else if (rssMb === undefined && metricsMb !== undefined) {
+    rssMb = metricsMb;
+    rssSource = "metrics";
+  } else if (rssMb !== undefined && !rssSource) {
+    rssSource = "cgroup";
+  } else if (rssMb === undefined) {
+    rssSource = "unknown";
+  }
+
+  if (workingSetMb === undefined && metricsMb !== undefined) {
+    workingSetMb = metricsMb;
+  }
+  if (workingSetMb === undefined && rssMb !== undefined) {
+    workingSetMb = rssMb;
+  }
+
+  return {
+    ...pod,
+    rssMb,
+    workingSetMb,
+    memoryLimitMb: limitMb,
+    rssSource,
+  };
+}
+
+/** Prefer agent cgroup pods; fall back to attributed processes, then kubelet stats / metrics inventory. Never invent equal shares. */
+function resolveMemoryConsumers(
+  agentPods: PodConsumer[],
+  processes: ProcessSample[],
+  inventory: PodOnNode[],
+  podMetrics: K8sPodMetricSummary[],
+  podStats: K8sPodMemoryStat[],
+  memoryUsedMb: number | undefined,
+  nodeName: string,
+): PodConsumer[] {
+  const metricsByKey = new Map<string, K8sPodMetricSummary>(
+    podMetrics.map((metric) => [`${metric.namespace}/${metric.name}`, metric]),
+  );
+  const statsByKey = new Map<string, K8sPodMemoryStat>(
+    podStats.map((stat) => [`${stat.namespace}/${stat.name}`, stat]),
+  );
+  const limitByKey = new Map<string, number | undefined>(
+    inventory.map((pod) => [`${pod.namespace}/${pod.name}`, pod.memoryLimitMb]),
+  );
+
+  const sortByRss = (items: PodConsumer[]) =>
+    [...items].sort((a, b) => (b.workingSetMb ?? b.rssMb ?? 0) - (a.workingSetMb ?? a.rssMb ?? 0));
+
+  const enrich = (pod: PodConsumer) => enrichPodWithMetrics(pod, metricsByKey, statsByKey, limitByKey);
+
+  if (agentPods.length > 0) {
+    return attachGrowth(
+      sortByRss(agentPods.map(enrich)).slice(0, 16),
+      (pod) => `pod:${pod.namespace}/${pod.pod}`,
+      (pod) => pod.workingSetMb ?? pod.rssMb,
+    );
+  }
+
+  const byPod = new Map<string, PodConsumer>();
+  for (const proc of processes) {
+    if (!proc.pod) {
+      continue;
+    }
+    const key = `${proc.namespace ?? ""}/${proc.pod}`;
+    const current = byPod.get(key) ?? {
+      namespace: proc.namespace ?? "default",
+      pod: proc.pod,
+      rssMb: 0,
+      cpuPercent: 0,
+      rssSource: "proc" as const,
+    };
+    current.rssMb = (current.rssMb ?? 0) + (proc.rssMb ?? 0);
+    current.cpuPercent = (current.cpuPercent ?? 0) + (proc.cpuPercent ?? 0);
+    byPod.set(key, current);
+  }
+  if (byPod.size > 0) {
+    return attachGrowth(
+      sortByRss([...byPod.values()].map(enrich)).slice(0, 16),
+      (pod) => `pod:${pod.namespace}/${pod.pod}`,
+      (pod) => pod.workingSetMb ?? pod.rssMb,
+    );
+  }
+
+  // Inventory + kubelet stats / metrics-server — real per-pod values, never nodeUsed/N.
+  if (inventory.length > 0) {
+    const fromInventory = inventory.map((pod) => {
+      const key = `${pod.namespace}/${pod.name}`;
+      const stats = statsByKey.get(key);
+      const metric = metricsByKey.get(key);
+      const metricsMb = kiToMb(metric?.memoryUsedKi);
+      const rssMb = stats?.rssMb ?? metricsMb;
+      const workingSetMb = stats?.workingSetMb ?? metricsMb ?? stats?.rssMb;
+      return {
+        namespace: pod.namespace,
+        pod: pod.name,
+        rssMb,
+        workingSetMb,
+        memoryLimitMb: pod.memoryLimitMb,
+        rssSource: (rssMb !== undefined || workingSetMb !== undefined
+          ? "metrics"
+          : "unknown") as MemoryRssSource,
+      };
+    });
+    return attachGrowth(
+      sortByRss(fromInventory).slice(0, 16),
+      (pod) => `pod:${pod.namespace}/${pod.pod}`,
+      (pod) => pod.workingSetMb ?? pod.rssMb,
+    );
+  }
+
+  const hostProcs = processes
+    .filter((proc) => (proc.rssMb ?? 0) > 0)
+    .sort((a, b) => (b.rssMb ?? 0) - (a.rssMb ?? 0))
+    .slice(0, 10)
+    .map((proc) => ({
+      namespace: "node",
+      pod: proc.name,
+      rssMb: proc.rssMb,
+      workingSetMb: proc.rssMb,
+      cpuPercent: proc.cpuPercent,
+      rssSource: "proc" as const,
+    }));
+  if (hostProcs.length > 0) {
+    return attachGrowth(
+      hostProcs,
+      (pod) => `proc:${pod.pod}`,
+      (pod) => pod.rssMb,
+    );
+  }
+
+  if (memoryUsedMb !== undefined && memoryUsedMb > 0) {
+    return [
+      {
+        namespace: "node",
+        pod: nodeName,
+        rssMb: memoryUsedMb,
+        workingSetMb: memoryUsedMb,
+        rssSource: "unknown",
+      },
+    ];
+  }
+
+  return [];
+}
+
+function resolveContainerConsumers(
+  inventory: PodOnNode[],
+  podMetrics: K8sPodMetricSummary[],
+  podStats: K8sPodMemoryStat[],
+): ContainerConsumer[] {
+  const limitByKey = new Map<string, number | undefined>(
+    inventory.map((pod) => [`${pod.namespace}/${pod.name}`, pod.memoryLimitMb]),
+  );
+  const nodePodKeys = new Set<string>(inventory.map((pod) => `${pod.namespace}/${pod.name}`));
+  const rows: ContainerConsumer[] = [];
+  const seen = new Set<string>();
+
+  for (const stat of podStats) {
+    const key = `${stat.namespace}/${stat.name}`;
+    if (nodePodKeys.size > 0 && !nodePodKeys.has(key)) {
+      continue;
+    }
+    for (const container of stat.containers ?? []) {
+      const id = `${key}/${container.name}`;
+      if (seen.has(id)) {
+        continue;
+      }
+      seen.add(id);
+      rows.push({
+        namespace: stat.namespace,
+        pod: stat.name,
+        container: container.name,
+        rssMb: container.rssMb,
+        workingSetMb: container.workingSetMb ?? container.rssMb,
+        memoryLimitMb: limitByKey.get(key),
+        rssSource: container.rssMb !== undefined || container.workingSetMb !== undefined ? "metrics" : "unknown",
+      });
+    }
+  }
+
+  for (const metric of podMetrics) {
+    const key = `${metric.namespace}/${metric.name}`;
+    if (nodePodKeys.size > 0 && !nodePodKeys.has(key)) {
+      continue;
+    }
+    for (const container of metric.containers ?? []) {
+      const id = `${key}/${container.name}`;
+      if (seen.has(id)) {
+        continue;
+      }
+      seen.add(id);
+      const mb = kiToMb(container.memoryUsedKi);
+      rows.push({
+        namespace: metric.namespace,
+        pod: metric.name,
+        container: container.name,
+        rssMb: mb,
+        workingSetMb: mb,
+        memoryLimitMb: limitByKey.get(key),
+        rssSource: mb !== undefined ? "metrics" : "unknown",
+      });
+    }
+  }
+
+  return attachGrowth(
+    rows
+      .sort((a, b) => (b.workingSetMb ?? b.rssMb ?? 0) - (a.workingSetMb ?? a.rssMb ?? 0))
+      .slice(0, 24),
+    (row) => `ctr:${row.namespace}/${row.pod}/${row.container}`,
+    (row) => row.workingSetMb ?? row.rssMb,
+  );
+}
+
+function withProcessGrowth(processes: ProcessSample[]): ProcessSample[] {
+  return attachGrowth(
+    processes,
+    (proc) => `pid:${proc.pid}:${proc.name}`,
+    (proc) => proc.rssMb,
+  );
 }
 
 function mapKernelHotspots(agent?: AgentProfilePayload): KernelHotspot[] {
@@ -128,6 +407,7 @@ interface PodOnNode {
   namespace: string;
   name: string;
   nodeName: string;
+  memoryLimitMb?: number;
 }
 
 function normalizeHealth(value?: string): NodeHealth {
@@ -663,6 +943,9 @@ function buildDetail(
   events: MonitorEvent[],
   agent?: AgentProfilePayload,
   agentLive = false,
+  inventoryPods: PodOnNode[] = [],
+  podMetrics: K8sPodMetricSummary[] = [],
+  podStats: K8sPodMemoryStat[] = [],
 ): NodeProfileDetail {
   const metrics = networkMetrics(flows, agent?.network);
   const cpuPercent = agent?.cpu_percent;
@@ -700,14 +983,23 @@ function buildDetail(
   const psi = mapPSI(agent);
   const memoryDetail = mapMemoryDetail(agent);
   const kernelMemory = mapKernelMemory(agent);
-  const topPods = mapTopPods(agent);
-  const topProcesses = mapTopProcesses(agent);
+  const topProcesses = withProcessGrowth(mapTopProcesses(agent));
+  const topPods = resolveMemoryConsumers(
+    mapTopPods(agent),
+    topProcesses,
+    inventoryPods,
+    podMetrics,
+    podStats,
+    agent?.memory_used_mb,
+    node.name,
+  );
+  const topContainers = resolveContainerConsumers(inventoryPods, podMetrics, podStats);
   const kernelHotspots = mapKernelHotspots(agent);
   const timeline = mapTimeline(agent);
   const cpuStack = agent?.cpu_stack && agent.cpu_stack.length > 0
     ? agent.cpu_stack
-    : buildStack(flows, agent?.network?.stack);
-  const stackSource = agent?.stack_source ?? "inferred";
+    : [];
+  const stackSource = agent?.stack_source ?? (cpuStack.length > 0 ? "inferred" : undefined);
 
   if (psi.cpuLevel !== "normal" || psi.memoryLevel !== "normal") {
     profileMetrics.push(
@@ -789,6 +1081,7 @@ function buildDetail(
     memoryDetail,
     kernelMemory,
     topPods,
+    topContainers,
     topProcesses,
     kernelHotspots,
     timeline,
@@ -802,13 +1095,15 @@ export function buildProfileSnapshot(input: {
   events: MonitorEvent[];
   agentProfiles?: Map<string, AgentProfilePayload>;
   nodeMetrics?: Map<string, K8sNodeResourceMetrics>;
+  podMetrics?: K8sPodMetricSummary[];
+  podStats?: K8sPodMemoryStat[];
   selectedNode?: string;
 }): ProfileSnapshot {
   const podMap = podsOnNodeMap(input.pods);
   const agentProfiles = input.agentProfiles ?? new Map<string, AgentProfilePayload>();
   const nodeMetrics = input.nodeMetrics ?? new Map<string, K8sNodeResourceMetrics>();
-
-  const summaries: NodeProfileSummary[] = input.nodes.map((node) => {
+  const podMetrics = input.podMetrics ?? [];
+  const podStats = input.podStats ?? [];  const summaries: NodeProfileSummary[] = input.nodes.map((node) => {
     const nodeFlows = flowsForNode(input.network.flows, podMap.get(node.name) ?? new Set());
     const { agent, agentLive } = resolveAgentForNode(node, agentProfiles, nodeMetrics);
     const metrics = networkMetrics(nodeFlows, agent?.network);
@@ -852,7 +1147,17 @@ export function buildProfileSnapshot(input: {
   if (selectedRow) {
     const nodeFlows = flowsForNode(input.network.flows, podMap.get(selectedRow.name) ?? new Set());
     const { agent, agentLive } = resolveAgentForNode(selectedRow, agentProfiles, nodeMetrics);
-    selected = buildDetail(selectedRow, nodeFlows, input.events, agent, agentLive);
+    const inventory = input.pods.filter((pod) => pod.nodeName === selectedRow.name);
+    selected = buildDetail(
+      selectedRow,
+      nodeFlows,
+      input.events,
+      agent,
+      agentLive,
+      inventory,
+      podMetrics,
+      podStats,
+    );
   }
 
   return {

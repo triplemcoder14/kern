@@ -119,7 +119,7 @@ export class NetworkEngine {
       this.topology = buildTopology(pods, services, endpoints);
 
       const ebpfStatus = this.ebpfClient
-        ? await this.ebpfClient.status()
+        ? await this.ebpfClient.status(client)
         : {
             connected: false,
             collectorUrl: "",
@@ -129,7 +129,7 @@ export class NetworkEngine {
       this.lastEbpfStatus = ebpfStatus;
 
       if (this.ebpfClient && ebpfStatus.connected) {
-        const ebpfFlows = await this.ebpfClient.fetchFlows(this.topology);
+        const ebpfFlows = await this.ebpfClient.fetchFlows(this.topology, client);
         for (const flow of ebpfFlows) {
           this.pushFlow(flow);
         }
