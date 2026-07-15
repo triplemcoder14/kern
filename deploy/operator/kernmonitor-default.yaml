@@ -6,6 +6,6 @@ spec:
   namespace: kern
   agent:
     image: kern/agent:latest
-    mode: auto
+    mode: ebpf
     imagePullPolicy: IfNotPresent
     port: 9474

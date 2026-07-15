@@ -23,7 +23,7 @@ operator:
 agent:
   image: ghcr.io/triplemcoder14/kern-agent:0.1.2
   imagePullPolicy: IfNotPresent
-  mode: auto
+  mode: ebpf
   port: 9474
 
 monitor:

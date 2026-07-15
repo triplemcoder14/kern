@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/kern/agent/internal/k8s"
@@ -12,13 +13,14 @@ import (
 	"github.com/kern/agent/internal/trace"
 )
 
-const AgentVersion = "0.6.0"
+const AgentVersion = "0.7.0"
 
 type Server struct {
-	flows     *store.FlowStore
-	tracer    trace.Tracer
-	resolver  *k8s.Resolver
-	profile   profile.Collector
+	flows    *store.FlowStore
+	tables   *store.TableStore
+	tracer   trace.Tracer
+	resolver *k8s.Resolver
+	profile  profile.Collector
 }
 
 type profilePodLookup struct {
@@ -33,9 +35,10 @@ func (p profilePodLookup) LookupPodByUID(uid string) (namespace, name string, ok
 	return ref.Namespace, ref.Name, true
 }
 
-func NewServer(flows *store.FlowStore, tracer trace.Tracer, resolver *k8s.Resolver) *Server {
+func NewServer(flows *store.FlowStore, tables *store.TableStore, tracer trace.Tracer, resolver *k8s.Resolver) *Server {
 	return &Server{
 		flows:    flows,
+		tables:   tables,
 		tracer:   tracer,
 		resolver: resolver,
 		profile:  profile.NewCollector(profilePodLookup{resolver: resolver}),
@@ -49,6 +52,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/flows", s.handleFlows)
 	mux.HandleFunc("/api/v1/flows/stream", s.handleFlowStream)
 	mux.HandleFunc("/api/v1/profile", s.handleProfile)
+	mux.HandleFunc("/api/v1/tables", s.handleTables)
+	mux.HandleFunc("/api/v1/tables/", s.handleTableRows)
 	return withCORS(mux)
 }
 
@@ -88,6 +93,7 @@ func (s *Server) handleAgentInfo(w http.ResponseWriter, r *http.Request) {
 			"flow_stream":  "/api/v1/flows/stream",
 			"agent_info":   "/api/v1/agent",
 			"profile":      "/api/v1/profile",
+			"tables":       "/api/v1/tables",
 		},
 	})
 }
@@ -99,10 +105,97 @@ func (s *Server) handleProfile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	snapshot := s.profile.Snapshot(s.flows)
+	if s.tables != nil {
+		for _, frame := range snapshot.CPUStack {
+			s.tables.Append(store.TableCPUStacks, store.Row{
+				"node":  snapshot.NodeName,
+				"label": frame.Label,
+				"depth": frame.Depth,
+				"width": frame.Width,
+				"heat":  frame.Heat,
+				"kind":  frame.Kind,
+				"source": snapshot.StackSource,
+			})
+		}
+	}
 	writeJSON(w, map[string]interface{}{
 		"agent":   "kern-agent",
 		"version": AgentVersion,
 		"profile": snapshot,
+	})
+}
+
+func (s *Server) handleTables(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if r.URL.Path != "/api/v1/tables" && r.URL.Path != "/api/v1/tables/" {
+		s.handleTableRows(w, r)
+		return
+	}
+
+	tables := []map[string]interface{}{}
+	if s.tables != nil {
+		for _, name := range s.tables.Names() {
+			table, ok := s.tables.Get(name)
+			if !ok {
+				continue
+			}
+			count := table.Len()
+			if name == store.TableFlows {
+				count = len(s.flows.Snapshot(0))
+			}
+			tables = append(tables, map[string]interface{}{
+				"name": name,
+				"rows": count,
+			})
+		}
+	}
+	writeJSON(w, map[string]interface{}{
+		"agent":  "kern-agent",
+		"tables": tables,
+	})
+}
+
+func (s *Server) handleTableRows(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	name := strings.TrimPrefix(r.URL.Path, "/api/v1/tables/")
+	name = strings.Trim(name, "/")
+	if name == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	limit := 200
+	if name == store.TableFlows {
+		snapshot := s.flows.Snapshot(limit)
+		rows := make([]map[string]interface{}, 0, len(snapshot))
+		for _, flow := range snapshot {
+			rows = append(rows, flowToJSON(flow))
+		}
+		writeJSON(w, map[string]interface{}{
+			"table": name,
+			"rows":  rows,
+		})
+		return
+	}
+
+	if s.tables == nil {
+		http.NotFound(w, r)
+		return
+	}
+	table, ok := s.tables.Get(name)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, map[string]interface{}{
+		"table": name,
+		"rows":  table.Snapshot(limit),
 	})
 }
 

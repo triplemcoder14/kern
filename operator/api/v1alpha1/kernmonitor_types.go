@@ -35,8 +35,8 @@ type KernAgentSpec struct {
 	// +kubebuilder:default="kern/agent:latest"
 	Image string `json:"image,omitempty"`
 
-	// Flow collection mode: auto, ebpf, proc, hubble.
-	// +kubebuilder:default=auto
+	// Flow collection mode: ebpf (required), auto (alias of ebpf), proc (emergency), hubble.
+	// +kubebuilder:default=ebpf
 	Mode string `json:"mode,omitempty"`
 
 	// Hubble relay address when mode is hubble.

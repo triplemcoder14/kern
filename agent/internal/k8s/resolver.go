@@ -182,19 +182,21 @@ func podUIDKeys(uid string) []string {
 	if uid == "" {
 		return nil
 	}
-	compact := strings.ReplaceAll(uid, "-", "")
+	compact := strings.ReplaceAll(strings.ReplaceAll(uid, "-", ""), "_", "")
 	keys := []string{uid}
 	if compact != uid {
 		keys = append(keys, compact)
 	}
-	if !strings.Contains(uid, "-") && len(compact) == 32 {
-		keys = append(keys, formatPodUID(compact))
+	if len(compact) == 32 {
+		formatted := formatPodUID(compact)
+		keys = append(keys, formatted, strings.ReplaceAll(formatted, "-", "_"))
 	}
 	return keys
 }
 
 func formatPodUID(raw string) string {
 	raw = strings.ReplaceAll(raw, "-", "")
+	raw = strings.ReplaceAll(raw, "_", "")
 	if len(raw) != 32 {
 		return raw
 	}

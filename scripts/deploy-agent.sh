@@ -67,7 +67,7 @@ if [[ -n "$POD" ]]; then
 fi
 
 echo ""
-echo "KERN agent deployed (ProcNet mode)."
+echo "KERN agent deployed (eBPF mode)."
 echo ""
 echo "Prefer the operator install for production:"
 echo "  ./scripts/install-kern.sh"
