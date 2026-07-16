@@ -14,27 +14,29 @@ function formatTime(iso: string): string {
   return date.toLocaleTimeString();
 }
 
+function formatTxid(value?: number): string {
+  if (value === undefined || value === 0) {
+    return "—";
+  }
+  return `0x${value.toString(16).padStart(4, "0")}`;
+}
+
 export function DnsTab({ flows }: { flows: NetworkFlow[] }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const summary = useMemo(() => buildDnsSummary(flows), [flows]);
   const rows = useMemo(() => buildDnsRows(flows), [flows]);
   const selected = rows.find((row) => row.id === selectedId) ?? null;
+  const nxdomainCount = rows.filter((row) => row.responseCode === "NXDOMAIN").length;
 
   const cards = [
     { label: "Queries/sec", value: String(summary.queriesPerSec) },
     { label: "Failure Rate", value: `${summary.failureRate}%` },
-    { label: "Timeouts", value: String(summary.timeouts) },
-    { label: "Failures", value: String(summary.failures) },
+    { label: "NXDOMAIN", value: String(nxdomainCount) },
     { label: "P95 Latency", value: formatMs(summary.p95LatencyMs) },
   ];
 
   return (
     <div className="network-ws-overview">
-      <p className="network-ws-banner">
-        DNS tab is live on L4 port-53 flows. Query names, NXDOMAIN, and packet decode arrive with
-        agent DNS capture — fields marked * are inferred from verdict/latency today.
-      </p>
-
       <div className="network-ws-cards">
         {cards.map((card) => (
           <div key={card.label} className="network-ws-card">
@@ -48,7 +50,7 @@ export function DnsTab({ flows }: { flows: NetworkFlow[] }) {
         <section className="panel">
           <div className="panel-header">TOP DNS SERVERS</div>
           {summary.topServers.length === 0 ? (
-            <div className="empty-state">No DNS (port 53) traffic in this window.</div>
+            <div className="empty-state">No DNS traffic in this window.</div>
           ) : (
             <ul className="network-ws-list">
               {summary.topServers.map((item) => (
@@ -85,13 +87,6 @@ export function DnsTab({ flows }: { flows: NetworkFlow[] }) {
             </ul>
           )}
         </section>
-        <section className="panel">
-          <div className="panel-header">DNS COVERAGE</div>
-          <p className="network-ws-note">
-            Captured today: connect samples to :53, latency estimate, drop/timeout verdict.
-            Coming next: query name, record type, NXDOMAIN, answer RDATA, transaction ID.
-          </p>
-        </section>
       </div>
 
       <div className="network-ws-flows-layout">
@@ -99,7 +94,7 @@ export function DnsTab({ flows }: { flows: NetworkFlow[] }) {
           <div className="panel-header">DNS LOOKUPS</div>
           <div className="network-ws-table-wrap">
             {rows.length === 0 ? (
-              <div className="empty-state">No DNS flows — generate CoreDNS or node DNS traffic.</div>
+              <div className="empty-state">No DNS lookups in this window.</div>
             ) : (
               <table className="network-ws-path-table">
                 <thead>
@@ -110,6 +105,7 @@ export function DnsTab({ flows }: { flows: NetworkFlow[] }) {
                     <th>Query</th>
                     <th>Type</th>
                     <th>Code</th>
+                    <th>TxID</th>
                     <th>Latency</th>
                   </tr>
                 </thead>
@@ -132,6 +128,7 @@ export function DnsTab({ flows }: { flows: NetworkFlow[] }) {
                       <td>{row.query}</td>
                       <td>{row.type}</td>
                       <td>{row.responseCode}</td>
+                      <td>{formatTxid(row.txid)}</td>
                       <td>{formatMs(row.latencyMs)}</td>
                     </tr>
                   ))}
@@ -173,6 +170,20 @@ export function DnsTab({ flows }: { flows: NetworkFlow[] }) {
                 <div>
                   <dt>Response</dt>
                   <dd>{selected.responseCode}</dd>
+                </div>
+                <div>
+                  <dt>Transaction ID</dt>
+                  <dd>{formatTxid(selected.txid)}</dd>
+                </div>
+                <div>
+                  <dt>Answers</dt>
+                  <dd>
+                    {selected.answers.length === 0
+                      ? "—"
+                      : selected.answers.map((answer) => (
+                          <div key={answer}>{answer}</div>
+                        ))}
+                  </dd>
                 </div>
                 <div>
                   <dt>Latency</dt>

@@ -24,6 +24,9 @@ RUN set -eux; \
   GOPACKAGE=ebpf go run github.com/cilium/ebpf/cmd/bpf2go@v0.19.0 \
     -cc clang -cflags "-O2 -g -Wall -Werror" -target "${BPF_TARGET}" \
     -output-dir internal/ebpf flows bpf/flows.c -- -Ibpf; \
+  GOPACKAGE=ebpf go run github.com/cilium/ebpf/cmd/bpf2go@v0.19.0 \
+    -cc clang -cflags "-O2 -g -Wall -Werror" -target "${BPF_TARGET}" \
+    -output-dir internal/ebpf dns bpf/dns.c -- -Ibpf; \
   GOPACKAGE=profile go run github.com/cilium/ebpf/cmd/bpf2go@v0.19.0 \
     -cc clang -cflags "-O2 -g -Wall -Werror" -target "${BPF_TARGET}" \
     -output-dir internal/profile profileStacks bpf/profile_stacks.c -- -Ibpf; \

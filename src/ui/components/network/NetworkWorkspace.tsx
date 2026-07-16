@@ -102,10 +102,6 @@ function EbpfPanel({ snapshot }: { snapshot: NetworkSnapshot }) {
           </div>
         </dl>
       ) : null}
-      <p className="network-ws-note">
-        Latency is agent-estimated from L4 connect samples. Bytes and retransmits populate when the
-        collector fills those fields.
-      </p>
     </section>
   );
 }

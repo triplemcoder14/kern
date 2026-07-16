@@ -23,9 +23,12 @@ export interface DnsFlowRow {
   query: string;
   type: string;
   responseCode: string;
+  answers: string[];
+  txid?: number;
   latencyMs?: number;
   verdict: FlowVerdict;
   path?: string;
+  decoded: boolean;
 }
 
 export interface ProtocolGroup {
@@ -92,15 +95,22 @@ function percentile(sorted: number[], p: number): number | undefined {
 }
 
 function isDnsFlow(flow: NetworkFlow): boolean {
-  return flow.port === 53 || inferProtocolClass(flow.port, flow.protocol) === "dns";
+  return (
+    Boolean(flow.dnsQuery || flow.dnsTxid || flow.dnsRcode) ||
+    flow.port === 53 ||
+    inferProtocolClass(flow.port, flow.protocol) === "dns"
+  );
 }
 
 function isFailed(verdict: FlowVerdict): boolean {
   return verdict === "DROPPED" || verdict === "TIMEOUT" || verdict === "RETRY";
 }
 
-function dnsResponseCode(verdict: FlowVerdict): string {
-  switch (verdict) {
+function dnsResponseCode(flow: NetworkFlow): string {
+  if (flow.dnsRcode) {
+    return flow.dnsRcode;
+  }
+  switch (flow.verdict) {
     case "OK":
       return "NOERROR*";
     case "TIMEOUT":
@@ -144,9 +154,17 @@ function tcpSocketState(verdict: FlowVerdict): string {
   }
 }
 
+function isDnsFailure(flow: NetworkFlow): boolean {
+  if (isFailed(flow.verdict)) {
+    return true;
+  }
+  const code = flow.dnsRcode;
+  return code === "NXDOMAIN" || code === "SERVFAIL" || code === "REFUSED" || code === "FORMERR";
+}
+
 export function buildDnsSummary(flows: NetworkFlow[]): DnsSummary {
   const dns = flows.filter(isDnsFlow);
-  const failures = dns.filter((flow) => isFailed(flow.verdict));
+  const failures = dns.filter(isDnsFailure);
   const timeouts = dns.filter((flow) => flow.verdict === "TIMEOUT").length;
   const latencies = dns
     .map((flow) => flow.latencyMs)
@@ -192,20 +210,26 @@ export function buildDnsRows(flows: NetworkFlow[]): DnsFlowRow[] {
     .filter(isDnsFlow)
     .slice()
     .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-    .map((flow) => ({
-      id: flow.id,
-      timestamp: flow.timestamp,
-      source: flow.src.name,
-      sourceNamespace: flow.src.namespace,
-      server: flow.dst.name,
-      serverNamespace: flow.dst.namespace,
-      query: flow.path?.includes("dns") ? flow.path : "— (decode pending)",
-      type: "A/AAAA*",
-      responseCode: dnsResponseCode(flow.verdict),
-      latencyMs: flow.latencyMs,
-      verdict: flow.verdict,
-      path: flow.path,
-    }));
+    .map((flow) => {
+      const decoded = Boolean(flow.dnsQuery || flow.dnsRcode || flow.dnsTxid);
+      return {
+        id: flow.id,
+        timestamp: flow.timestamp,
+        source: flow.src.name,
+        sourceNamespace: flow.src.namespace,
+        server: flow.dst.name,
+        serverNamespace: flow.dst.namespace,
+        query: flow.dnsQuery || "—",
+        type: flow.dnsType || (decoded ? "—" : "—"),
+        responseCode: dnsResponseCode(flow),
+        answers: flow.dnsAnswers ?? [],
+        txid: flow.dnsTxid,
+        latencyMs: flow.latencyMs,
+        verdict: flow.verdict,
+        path: flow.path,
+        decoded,
+      };
+    });
 }
 
 const PROTOCOL_ORDER: ProtocolClass[] = [
