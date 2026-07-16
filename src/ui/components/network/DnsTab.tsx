@@ -119,13 +119,25 @@ export function DnsTab({ flows }: { flows: NetworkFlow[] }) {
                       <td>{formatTime(row.timestamp)}</td>
                       <td>
                         <div className="network-ws-cell-main">{row.source}</div>
-                        <div className="network-ws-cell-sub">{row.sourceNamespace ?? "—"}</div>
+                        <div className="network-ws-cell-sub">
+                          {row.sourceNamespace ?? row.sourceIp ?? "—"}
+                        </div>
                       </td>
                       <td>
                         <div className="network-ws-cell-main">{row.server}</div>
                         <div className="network-ws-cell-sub">{row.serverNamespace ?? "—"}</div>
                       </td>
-                      <td>{row.query}</td>
+                      <td>
+                        <div className="network-ws-cell-main">{row.query}</div>
+                        {row.searchExpanded ? (
+                          <span
+                            className="network-ws-dns-badge"
+                            title="This query appears to have been expanded by the resolver search path."
+                          >
+                            Search domain expansion
+                          </span>
+                        ) : null}
+                      </td>
                       <td>{row.type}</td>
                       <td>{row.responseCode}</td>
                       <td>{formatTxid(row.txid)}</td>
@@ -144,12 +156,25 @@ export function DnsTab({ flows }: { flows: NetworkFlow[] }) {
             <div className="flow-detail-empty">Select a lookup row.</div>
           ) : (
             <>
+              {selected.searchExpanded ? (
+                <div
+                  className="network-ws-dns-badge network-ws-dns-badge-block"
+                  title="This query appears to have been expanded by the resolver search path."
+                >
+                  Search domain expansion
+                </div>
+              ) : null}
               <dl className="network-ws-kv">
                 <div>
                   <dt>Source</dt>
                   <dd>
-                    {selected.sourceNamespace ? `${selected.sourceNamespace}/` : ""}
-                    {selected.source}
+                    <div className="network-ws-cell-main">
+                      {selected.sourceNamespace ? `${selected.sourceNamespace}/` : ""}
+                      {selected.source}
+                    </div>
+                    {selected.sourceIp ? (
+                      <div className="network-ws-cell-sub">{selected.sourceIp}</div>
+                    ) : null}
                   </dd>
                 </div>
                 <div>
@@ -168,9 +193,30 @@ export function DnsTab({ flows }: { flows: NetworkFlow[] }) {
                   <dd>{selected.type}</dd>
                 </div>
                 <div>
-                  <dt>Response</dt>
+                  <dt>DNS result</dt>
                   <dd>{selected.responseCode}</dd>
                 </div>
+                <div>
+                  <dt>Resolution</dt>
+                  <dd>{selected.resolutionStatus ?? "—"}</dd>
+                </div>
+                <div>
+                  <dt>Verdict</dt>
+                  {/* <dd>{selected.verdict}</dd> */}
+                  <dd>{selected.analysisVerdict ?? "—"}</dd>
+                </div>
+                {selected.reason ? (
+                  <div>
+                    <dt>Reason</dt>
+                    <dd>{selected.reason}</dd>
+                  </div>
+                ) : null}
+                {selected.suggestion ? (
+                  <div>
+                    <dt>Suggestion</dt>
+                    <dd>{selected.suggestion}</dd>
+                  </div>
+                ) : null}
                 <div>
                   <dt>Transaction ID</dt>
                   <dd>{formatTxid(selected.txid)}</dd>
@@ -189,15 +235,28 @@ export function DnsTab({ flows }: { flows: NetworkFlow[] }) {
                   <dt>Latency</dt>
                   <dd>{formatMs(selected.latencyMs)}</dd>
                 </div>
-                <div>
-                  <dt>Verdict</dt>
-                  <dd>{selected.verdict}</dd>
-                </div>
               </dl>
-              {selected.path ? (
+
+              {selected.resolutionPath && selected.resolutionPath.length > 0 ? (
+                <div className="network-ws-path network-ws-dns-resolution">
+                  <span className="profile-panel-label">Resolution</span>
+                  <ol className="network-ws-dns-chain">
+                    {selected.resolutionPath.map((step) => (
+                      <li key={step}>{step}</li>
+                    ))}
+                  </ol>
+                </div>
+              ) : null}
+
+              {selected.searchExpansion && selected.searchExpansion.length > 0 ? (
                 <div className="network-ws-path">
-                  <span className="profile-panel-label">Path</span>
-                  <code>{selected.path}</code>
+                  <span className="profile-panel-label">Search path expansion</span>
+                  <ol className="network-ws-dns-chain network-ws-dns-chain-warn">
+                    {selected.searchExpansion.map((step) => (
+                      <li key={step}>{step}</li>
+                    ))}
+                    <li>{selected.responseCode}</li>
+                  </ol>
                 </div>
               ) : null}
             </>

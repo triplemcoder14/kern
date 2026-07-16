@@ -126,6 +126,20 @@ func (s *FlowStore) Upsert(flow Flow) {
 		if flow.TcpEvent == "" {
 			flow.TcpEvent = existing.TcpEvent
 		}
+		if flow.SrcIP == "" {
+			flow.SrcIP = existing.SrcIP
+		}
+		if flow.SrcPod == "" {
+			flow.SrcPod = existing.SrcPod
+			flow.SrcNamespace = existing.SrcNamespace
+		}
+		if flow.SrcService == "" {
+			flow.SrcService = existing.SrcService
+			flow.SrcServiceNamespace = existing.SrcServiceNamespace
+		}
+		if flow.DstIP == "" {
+			flow.DstIP = existing.DstIP
+		}
 		if flow.HttpMethod == "" {
 			flow.HttpMethod = existing.HttpMethod
 		}
@@ -193,6 +207,17 @@ func (s *FlowStore) Upsert(flow Flow) {
 			if existing.DstService == "" && flow.DstService != "" {
 				existing.DstService = flow.DstService
 				existing.DstServiceNamespace = flow.DstServiceNamespace
+			}
+			if existing.SrcIP == "" && flow.SrcIP != "" {
+				existing.SrcIP = flow.SrcIP
+			}
+			if existing.SrcPod == "" && flow.SrcPod != "" {
+				existing.SrcPod = flow.SrcPod
+				existing.SrcNamespace = flow.SrcNamespace
+			}
+			if existing.SrcService == "" && flow.SrcService != "" {
+				existing.SrcService = flow.SrcService
+				existing.SrcServiceNamespace = flow.SrcServiceNamespace
 			}
 			latency := uint32(now.Sub(existing.FirstSeen).Milliseconds())
 			if latency == 0 {
