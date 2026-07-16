@@ -1,4 +1,4 @@
-import { inferProtocolClass, protocolClassLabel, type ProtocolClass } from "./protocol-class";
+import { inferProtocolClass, protocolClassLabel, resolveProtocolClass, type ProtocolClass } from "./protocol-class";
 import type { FlowVerdict, NetworkFlow } from "../types/network";
 
 const WINDOW_SECONDS = 15;
@@ -67,6 +67,8 @@ export interface ProtocolFlowRow {
   httpMethod?: string;
   httpPath?: string;
   httpStatus?: number;
+  grpcMethod?: string;
+  grpcStatus?: number;
 }
 
 export interface TcpHealthSummary {
@@ -417,7 +419,7 @@ const PROTOCOL_ORDER: ProtocolClass[] = [
 export function buildProtocolGroups(flows: NetworkFlow[]): ProtocolGroup[] {
   const groups = new Map<ProtocolClass, NetworkFlow[]>();
   for (const flow of flows) {
-    const cls = inferProtocolClass(flow.port, flow.protocol);
+    const cls = resolveProtocolClass(flow);
     const bucket = groups.get(cls) ?? [];
     bucket.push(flow);
     groups.set(cls, bucket);
@@ -430,9 +432,15 @@ export function buildProtocolGroups(flows: NetworkFlow[]): ProtocolGroup[] {
       .filter((value): value is number => value !== undefined)
       .sort((a, b) => a - b);
     const ports = [...new Set(bucket.map((flow) => flow.port))].sort((a, b) => a - b);
+    const decoded = bucket.some(
+      (flow) =>
+        Boolean(flow.httpMethod || flow.httpPath || flow.httpStatus !== undefined) ||
+        Boolean(flow.grpcMethod || flow.grpcStatus !== undefined) ||
+        Boolean(flow.dnsQuery),
+    );
     return {
       id,
-      label: protocolClassLabel(id),
+      label: protocolClassLabel(id, decoded),
       flowCount: bucket.length,
       requestsPerSec: Number((bucket.length / WINDOW_SECONDS).toFixed(2)),
       p95LatencyMs: percentile(latencies, 95),
@@ -447,7 +455,7 @@ export function buildProtocolRows(
   appClass: ProtocolClass | "all",
 ): ProtocolFlowRow[] {
   return flows
-    .filter((flow) => appClass === "all" || inferProtocolClass(flow.port, flow.protocol) === appClass)
+    .filter((flow) => appClass === "all" || resolveProtocolClass(flow) === appClass)
     .slice()
     .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
     .map((flow) => ({
@@ -459,7 +467,7 @@ export function buildProtocolRows(
       destinationNamespace: flow.dst.namespace,
       protocol: flow.protocol,
       port: flow.port,
-      appClass: inferProtocolClass(flow.port, flow.protocol),
+      appClass: resolveProtocolClass(flow),
       latencyMs: flow.latencyMs,
       verdict: flow.verdict,
       bytesSent: flow.bytesSent,
@@ -468,6 +476,8 @@ export function buildProtocolRows(
       httpMethod: flow.httpMethod,
       httpPath: flow.httpPath,
       httpStatus: flow.httpStatus,
+      grpcMethod: flow.grpcMethod,
+      grpcStatus: flow.grpcStatus,
     }));
 }
 

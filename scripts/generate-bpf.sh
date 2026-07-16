@@ -21,6 +21,9 @@ generate_in_docker() {
       && GOPACKAGE=ebpf go run github.com/cilium/ebpf/cmd/bpf2go@v0.19.0 -cc clang -cflags "-O2 -g -Wall -Werror" -target amd64,arm64 \
            http bpf/http.c -- -Ibpf \
       && mv http_* internal/ebpf/ \
+      && GOPACKAGE=ebpf go run github.com/cilium/ebpf/cmd/bpf2go@v0.19.0 -cc clang -cflags "-O2 -g -Wall -Werror" -target amd64,arm64 \
+           grpc bpf/grpc.c -- -Ibpf \
+      && mv grpc_* internal/ebpf/ \
       && GOPACKAGE=profile go run github.com/cilium/ebpf/cmd/bpf2go@v0.19.0 -cc clang -cflags "-O2 -g -Wall -Werror" -target amd64,arm64 \
            profileStacks bpf/profile_stacks.c -- -Ibpf \
       && mv profilestacks_* internal/profile/'

@@ -174,17 +174,17 @@ export function ProtocolsTab({ flows }: { flows: NetworkFlow[] }) {
               </div>
               <div>
                 <dt>Method / Route</dt>
-                {/* <dd>— (decode pending)</dd> */}
                 <dd>
-                  {selected.httpMethod || selected.httpPath
-                    ? `${selected.httpMethod ?? "—"} ${selected.httpPath ?? ""}`.trim()
-                    : "—"}
+                  {selected.grpcMethod
+                    ? selected.grpcMethod
+                    : selected.httpMethod || selected.httpPath
+                      ? `${selected.httpMethod ?? "—"} ${selected.httpPath ?? ""}`.trim()
+                      : "—"}
                 </dd>
               </div>
               <div>
                 <dt>Status code</dt>
-                {/* <dd>— (decode pending)</dd> */}
-                <dd>{selected.httpStatus ?? "—"}</dd>
+                <dd>{selected.grpcStatus ?? selected.httpStatus ?? "—"}</dd>
               </div>
             </dl>
           )}
