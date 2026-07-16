@@ -24,6 +24,8 @@ export interface NetworkFlow {
   bytesSent?: number;
   bytesReceived?: number;
   retransmits?: number;
+  tcpState?: string;
+  tcpEvent?: string;
 }
 
 export interface NetworkNode {
@@ -97,4 +99,6 @@ export interface EbpfFlowPayload {
   bytes_sent?: number;
   bytes_received?: number;
   retransmits?: number;
+  tcp_state?: string;
+  tcp_event?: string;
 }

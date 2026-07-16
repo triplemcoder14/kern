@@ -307,6 +307,8 @@ func flowToJSON(flow store.Flow) map[string]interface{} {
 	if flow.Retransmits != nil {
 		item["retransmits"] = *flow.Retransmits
 	}
+	setOptional(item, "tcp_state", flow.TcpState)
+	setOptional(item, "tcp_event", flow.TcpEvent)
 	return item
 }
 

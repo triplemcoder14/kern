@@ -58,6 +58,7 @@ export interface ProtocolFlowRow {
 export interface TcpHealthSummary {
   connections: number;
   drops: number;
+  resets: number;
   retransmits: number;
   timeouts: number;
   retries: number;
@@ -114,14 +115,29 @@ function dnsResponseCode(verdict: FlowVerdict): string {
   }
 }
 
-function tcpReason(verdict: FlowVerdict): string {
-  switch (verdict) {
+function tcpReason(flow: NetworkFlow): string {
+  if (flow.tcpEvent === "retransmit") {
+    return "TCP retransmit";
+  }
+  if (flow.tcpEvent === "reset") {
+    return "Connection reset";
+  }
+  if (flow.tcpEvent === "timeout") {
+    return "Connect timeout";
+  }
+  if (flow.tcpEvent === "close") {
+    return "Connection closed";
+  }
+  if (flow.tcpEvent === "established") {
+    return "Established";
+  }
+  switch (flow.verdict) {
     case "DROPPED":
       return "Connection drop / denied";
     case "TIMEOUT":
       return "RTO / connect timeout";
     case "RETRY":
-      return "SYN retry / reconnect";
+      return "Retransmit / retry";
     case "OK":
       return "Established";
     default:
@@ -129,16 +145,19 @@ function tcpReason(verdict: FlowVerdict): string {
   }
 }
 
-function tcpSocketState(verdict: FlowVerdict): string {
-  switch (verdict) {
+function tcpSocketState(flow: NetworkFlow): string {
+  if (flow.tcpState) {
+    return flow.tcpState;
+  }
+  switch (flow.verdict) {
     case "OK":
-      return "ESTABLISHED*";
+      return "ESTABLISHED";
     case "TIMEOUT":
-      return "SYN_SENT*";
+      return "SYN_SENT";
     case "RETRY":
-      return "SYN_SENT*";
+      return "RETRANS";
     case "DROPPED":
-      return "CLOSED*";
+      return "CLOSE";
     default:
       return "—";
   }
@@ -284,10 +303,11 @@ export function buildTcpHealthSummary(flows: NetworkFlow[]): TcpHealthSummary {
 
   return {
     connections: tcp.length,
-    drops: tcp.filter((flow) => flow.verdict === "DROPPED").length,
+    drops: tcp.filter((flow) => flow.verdict === "DROPPED" || flow.tcpEvent === "reset").length,
+    resets: tcp.filter((flow) => flow.tcpEvent === "reset").length,
     retransmits: tcp.reduce((sum, flow) => sum + (flow.retransmits ?? 0), 0),
-    timeouts: tcp.filter((flow) => flow.verdict === "TIMEOUT").length,
-    retries: tcp.filter((flow) => flow.verdict === "RETRY").length,
+    timeouts: tcp.filter((flow) => flow.verdict === "TIMEOUT" || flow.tcpEvent === "timeout").length,
+    retries: tcp.filter((flow) => flow.tcpEvent === "retransmit" || (flow.retransmits ?? 0) > 0).length,
     ok: tcp.filter((flow) => flow.verdict === "OK").length,
     p95LatencyMs: percentile(latencies, 95),
   };
@@ -307,8 +327,8 @@ export function buildTcpEventRows(flows: NetworkFlow[], problemOnly = true): Tcp
       destination: flow.dst.name,
       destinationNamespace: flow.dst.namespace,
       nodeHint: flow.src.kind === "Pod" ? flow.src.namespace ?? "—" : flow.src.kind,
-      reason: tcpReason(flow.verdict),
-      socketState: tcpSocketState(flow.verdict),
+      reason: tcpReason(flow),
+      socketState: tcpSocketState(flow),
       retransmits: flow.retransmits ?? 0,
       bytes: (flow.bytesSent ?? 0) + (flow.bytesReceived ?? 0),
       latencyMs: flow.latencyMs,

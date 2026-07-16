@@ -36,7 +36,7 @@ func (t *ebpfTracer) Status() Status {
 		Mode:           "ebpf",
 		Programs:       ebpf.ProgramCount,
 		FlowsPerSecond: t.collector.FlowsPerSecond(),
-		Message:        "eBPF tracepoint sock/inet_sock_set_state (TCP established)",
+		Message:        "eBPF TCP L4 (state/RTT/bytes/retransmit)",
 	}
 }
 

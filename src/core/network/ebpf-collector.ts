@@ -308,6 +308,8 @@ export class EbpfCollectorClient {
       bytesSent: flow.bytes_sent,
       bytesReceived: flow.bytes_received,
       retransmits: flow.retransmits,
+      tcpState: flow.tcp_state,
+      tcpEvent: flow.tcp_event,
     };
   }
 }
