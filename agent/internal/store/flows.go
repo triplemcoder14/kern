@@ -43,6 +43,9 @@ type Flow struct {
 	HttpMethod string  `json:"http_method,omitempty"`
 	HttpPath   string  `json:"http_path,omitempty"`
 	HttpStatus *uint16 `json:"http_status,omitempty"`
+	// GrpcMethod / GrpcStatus are filled by the plaintext gRPC/HTTP2 sampler.
+	GrpcMethod string  `json:"grpc_method,omitempty"`
+	GrpcStatus *uint16 `json:"grpc_status,omitempty"`
 }
 
 type FlowStore struct {
@@ -149,10 +152,22 @@ func (s *FlowStore) Upsert(flow Flow) {
 		if flow.HttpStatus == nil {
 			flow.HttpStatus = existing.HttpStatus
 		}
+		if flow.GrpcMethod == "" {
+			flow.GrpcMethod = existing.GrpcMethod
+		}
+		if flow.GrpcStatus == nil {
+			flow.GrpcStatus = existing.GrpcStatus
+		}
 		// L4 updates must not erase a plaintext HTTP path annotation.
 		if flow.HttpMethod == "" && flow.HttpPath == "" && flow.HttpStatus == nil &&
 			(existing.HttpMethod != "" || existing.HttpPath != "" || existing.HttpStatus != nil) &&
 			existing.Path != "" {
+			flow.Path = existing.Path
+		}
+		// L4 updates must not erase a plaintext gRPC annotation.
+		if flow.GrpcMethod == "" && flow.GrpcStatus == nil &&
+			(existing.GrpcMethod != "" || existing.GrpcStatus != nil) &&
+			existing.Path != "" && flow.Path == "" {
 			flow.Path = existing.Path
 		}
 		// Retransmit probes should not erase a healthy established verdict.
