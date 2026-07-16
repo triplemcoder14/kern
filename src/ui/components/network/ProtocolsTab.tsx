@@ -30,6 +30,15 @@ export function ProtocolsTab({ flows }: { flows: NetworkFlow[] }) {
 
   return (
     <div className="network-ws-overview">
+      {/* <p className="network-ws-banner">
+        Protocol classes are port-inferred (*). Payload decode (HTTP method/route, SQL ops, Redis
+        commands) is next — this view already segments live L4 paths by app class.
+      </p> */}
+      <p className="network-ws-banner">
+        Plaintext HTTP/1.x method, route, and status are decoded from syscall payloads. TLS, gRPC,
+        and DB wire formats stay class-only for now.
+      </p>
+
       <div className="network-ws-proto-chips" role="tablist" aria-label="Protocol classes">
         <button
           type="button"
@@ -162,6 +171,20 @@ export function ProtocolsTab({ flows }: { flows: NetworkFlow[] }) {
               <div>
                 <dt>Status</dt>
                 <dd>{selected.verdict}</dd>
+              </div>
+              <div>
+                <dt>Method / Route</dt>
+                {/* <dd>— (decode pending)</dd> */}
+                <dd>
+                  {selected.httpMethod || selected.httpPath
+                    ? `${selected.httpMethod ?? "—"} ${selected.httpPath ?? ""}`.trim()
+                    : "—"}
+                </dd>
+              </div>
+              <div>
+                <dt>Status code</dt>
+                {/* <dd>— (decode pending)</dd> */}
+                <dd>{selected.httpStatus ?? "—"}</dd>
               </div>
             </dl>
           )}

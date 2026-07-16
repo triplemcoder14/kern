@@ -143,7 +143,24 @@ func (s *DnsSampler) Run(ctx context.Context, resolver *k8s.Resolver, flows *sto
 		}
 
 		dnsPath := flow.Path
+		// Connected UDP sockets often omit sockaddr; recover the client pod via cgroup.
+		resolver.EnrichClientFromPID(&flow, flowPID(record.RawSample))
+		// Drop server-side CoreDNS identity — those syscalls are the resolver, not the client.
+		if isDNSResolverPod(flow.SrcPod, flow.SrcNamespace) {
+			flow.SrcPod = ""
+			flow.SrcNamespace = ""
+			flow.SrcIP = ""
+			flow.SrcService = ""
+			flow.SrcServiceNamespace = ""
+		}
 		resolver.Enrich(&flow)
+		if isDNSResolverPod(flow.SrcPod, flow.SrcNamespace) {
+			flow.SrcPod = ""
+			flow.SrcNamespace = ""
+			flow.SrcIP = ""
+			flow.SrcService = ""
+			flow.SrcServiceNamespace = ""
+		}
 		if dnsPath != "" {
 			if flow.Path != "" {
 				flow.Path = dnsPath + " · " + flow.Path
@@ -156,6 +173,19 @@ func (s *DnsSampler) Run(ctx context.Context, resolver *k8s.Resolver, flows *sto
 	}
 }
 
+func isDNSResolverPod(name, namespace string) bool {
+	n := strings.ToLower(name)
+	return strings.Contains(n, "coredns") ||
+		(namespace == "kube-system" && (n == "kube-dns" || strings.HasPrefix(n, "kube-dns-")))
+}
+
+func flowPID(raw []byte) uint32 {
+	if len(raw) < 12 {
+		return 0
+	}
+	return binary.LittleEndian.Uint32(raw[8:12])
+}
+
 func decodeDnsEvent(raw []byte) (store.Flow, bool) {
 	const header = 28
 	if len(raw) < header {
@@ -163,6 +193,7 @@ func decodeDnsEvent(raw []byte) (store.Flow, bool) {
 	}
 
 	tsNS := binary.LittleEndian.Uint64(raw[0:8])
+	// pid := binary.LittleEndian.Uint32(raw[8:12]) // used via flowPID after decode
 	saddr := binary.LittleEndian.Uint32(raw[12:16])
 	daddr := binary.LittleEndian.Uint32(raw[16:20])
 	sport := binary.LittleEndian.Uint16(raw[20:22])
@@ -191,12 +222,15 @@ func decodeDnsEvent(raw []byte) (store.Flow, bool) {
 			port = dport
 		}
 	} else {
+		// Response: sockaddr points at the DNS server, not the client.
+		// Keep SrcIP empty here; EnrichClientFromPID fills the client pod.
 		if saddr != 0 {
 			dstIP = emptyIfZeroIP(ipv4String(saddr))
 		}
 		if sport != 0 {
 			port = sport
 		}
+		// srcIP = ""
 		srcIP = ""
 	}
 

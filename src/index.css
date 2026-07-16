@@ -7863,6 +7863,71 @@ tbody tr.selected {
   color: var(--muted);
 }
 
+.network-ws-dns-chain {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--fg);
+}
+
+.network-ws-dns-chain li {
+  position: relative;
+  padding-left: 0;
+  word-break: break-all;
+}
+
+.network-ws-dns-chain li + li::before {
+  content: "↓";
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.2;
+  margin: 2px 0;
+}
+
+.network-ws-dns-chain-warn li:last-child {
+  color: color-mix(in srgb, var(--danger, #b42318) 80%, var(--fg));
+}
+
+.network-ws-dns-badge {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, #b45309 35%, var(--border));
+  border-radius: var(--radius-sm, 4px);
+  background: color-mix(in srgb, #b45309 12%, transparent);
+  color: color-mix(in srgb, #b45309 85%, var(--fg));
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1.4;
+  cursor: help;
+}
+
+.network-ws-dns-badge-block {
+  display: block;
+  width: fit-content;
+  margin: 0 16px 8px;
+}
+
+.network-ws-dns-resolution .network-ws-dns-chain {
+  animation: network-ws-dns-chain-in 280ms ease-out;
+}
+
+@keyframes network-ws-dns-chain-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .network-ws-page .panel-header {
   display: flex;
   align-items: center;

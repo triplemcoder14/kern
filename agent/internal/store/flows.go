@@ -30,15 +30,19 @@ type Flow struct {
 	BytesSent           *uint64   `json:"bytes_sent,omitempty"`
 	BytesReceived       *uint64   `json:"bytes_received,omitempty"`
 	Retransmits         *uint32   `json:"retransmits,omitempty"`
-  
-// 	TcpState            string    `json:"tcp_state,omitempty"`
-// 	TcpEvent            string    `json:"tcp_event,omitempty"`
-  
-	DnsQuery            string    `json:"dns_query,omitempty"`
-	DnsType             string    `json:"dns_type,omitempty"`
-	DnsRcode            string    `json:"dns_rcode,omitempty"`
-	DnsAnswers          []string  `json:"dns_answers,omitempty"`
-	DnsTxid             uint16    `json:"dns_txid,omitempty"`
+	// TcpState / TcpEvent come from the L4 TCP collector.
+	TcpState string `json:"tcp_state,omitempty"`
+	TcpEvent string `json:"tcp_event,omitempty"`
+	// Dns* fields are filled by the DNS UDP sampler.
+	DnsQuery   string   `json:"dns_query,omitempty"`
+	DnsType    string   `json:"dns_type,omitempty"`
+	DnsRcode   string   `json:"dns_rcode,omitempty"`
+	DnsAnswers []string `json:"dns_answers,omitempty"`
+	DnsTxid    uint16   `json:"dns_txid,omitempty"`
+	// HttpMethod / HttpPath / HttpStatus are filled by the plaintext HTTP sampler.
+	HttpMethod string  `json:"http_method,omitempty"`
+	HttpPath   string  `json:"http_path,omitempty"`
+	HttpStatus *uint16 `json:"http_status,omitempty"`
 }
 
 type FlowStore struct {
@@ -122,6 +126,35 @@ func (s *FlowStore) Upsert(flow Flow) {
 		if flow.TcpEvent == "" {
 			flow.TcpEvent = existing.TcpEvent
 		}
+		if flow.SrcIP == "" {
+			flow.SrcIP = existing.SrcIP
+		}
+		if flow.SrcPod == "" {
+			flow.SrcPod = existing.SrcPod
+			flow.SrcNamespace = existing.SrcNamespace
+		}
+		if flow.SrcService == "" {
+			flow.SrcService = existing.SrcService
+			flow.SrcServiceNamespace = existing.SrcServiceNamespace
+		}
+		if flow.DstIP == "" {
+			flow.DstIP = existing.DstIP
+		}
+		if flow.HttpMethod == "" {
+			flow.HttpMethod = existing.HttpMethod
+		}
+		if flow.HttpPath == "" {
+			flow.HttpPath = existing.HttpPath
+		}
+		if flow.HttpStatus == nil {
+			flow.HttpStatus = existing.HttpStatus
+		}
+		// L4 updates must not erase a plaintext HTTP path annotation.
+		if flow.HttpMethod == "" && flow.HttpPath == "" && flow.HttpStatus == nil &&
+			(existing.HttpMethod != "" || existing.HttpPath != "" || existing.HttpStatus != nil) &&
+			existing.Path != "" {
+			flow.Path = existing.Path
+		}
 		// Retransmit probes should not erase a healthy established verdict.
 		if existing.Verdict == "OK" && flow.Verdict == "RETRY" {
 			flow.Verdict = "OK"
@@ -174,6 +207,17 @@ func (s *FlowStore) Upsert(flow Flow) {
 			if existing.DstService == "" && flow.DstService != "" {
 				existing.DstService = flow.DstService
 				existing.DstServiceNamespace = flow.DstServiceNamespace
+			}
+			if existing.SrcIP == "" && flow.SrcIP != "" {
+				existing.SrcIP = flow.SrcIP
+			}
+			if existing.SrcPod == "" && flow.SrcPod != "" {
+				existing.SrcPod = flow.SrcPod
+				existing.SrcNamespace = flow.SrcNamespace
+			}
+			if existing.SrcService == "" && flow.SrcService != "" {
+				existing.SrcService = flow.SrcService
+				existing.SrcServiceNamespace = flow.SrcServiceNamespace
 			}
 			latency := uint32(now.Sub(existing.FirstSeen).Milliseconds())
 			if latency == 0 {

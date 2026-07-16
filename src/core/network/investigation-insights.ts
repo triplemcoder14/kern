@@ -18,6 +18,7 @@ export interface DnsFlowRow {
   timestamp: string;
   source: string;
   sourceNamespace?: string;
+  sourceIp?: string;
   server: string;
   serverNamespace?: string;
   query: string;
@@ -29,6 +30,13 @@ export interface DnsFlowRow {
   verdict: FlowVerdict;
   path?: string;
   decoded: boolean;
+  reason?: string;
+  suggestion?: string;
+  searchExpansion?: string[];
+  searchExpanded?: boolean;
+  resolutionPath?: string[];
+  resolutionStatus?: "Succeeded" | "Failed" | "Unknown";
+  analysisVerdict?: DnsAnalysisVerdict;
 }
 
 export interface ProtocolGroup {
@@ -56,6 +64,9 @@ export interface ProtocolFlowRow {
   bytesSent?: number;
   bytesReceived?: number;
   path?: string;
+  httpMethod?: string;
+  httpPath?: string;
+  httpStatus?: number;
 }
 
 export interface TcpHealthSummary {
@@ -123,6 +134,126 @@ function dnsResponseCode(flow: NetworkFlow): string {
     default:
       return "UNKNOWN*";
   }
+}
+
+const CLUSTER_SEARCH = ".svc.cluster.local";
+const CLUSTER_LOCAL = ".cluster.local";
+
+/** Detect resolver search-path double-append and suggest the intended FQDN. */
+export function dnsSearchExpansion(query: string): {
+  expansion: string[];
+  suggestion?: string;
+} | null {
+  const q = query.trim().toLowerCase().replace(/\.$/, "");
+  if (!q) {
+    return null;
+  }
+  const doubledSvc = `${CLUSTER_SEARCH}${CLUSTER_SEARCH}`;
+  if (q.endsWith(doubledSvc)) {
+    const once = q.slice(0, -CLUSTER_SEARCH.length);
+    const base = once.endsWith(CLUSTER_SEARCH)
+      ? once.slice(0, -CLUSTER_SEARCH.length)
+      : once;
+    return {
+      expansion: [base || q, once, q],
+      suggestion: once.includes(".") ? once : `${base}${CLUSTER_SEARCH}`,
+    };
+  }
+  // ndots / search list can also append bare "cluster.local" onto an FQDN.
+  const doubledCluster = `${CLUSTER_LOCAL}${CLUSTER_LOCAL}`;
+  if (q.endsWith(doubledCluster) && q.includes(CLUSTER_SEARCH)) {
+    const once = q.slice(0, -CLUSTER_LOCAL.length);
+    return {
+      expansion: [once.replace(CLUSTER_SEARCH, "") || once, once, q],
+      suggestion: once,
+    };
+  }
+  return null;
+}
+
+export type DnsAnalysisVerdict =
+  | "Succeeded"
+  | "Failed"
+  | "Configuration issue"
+  | "Transient failure"
+  | "Expected";
+
+export function dnsAnalysisVerdict(
+  code: string,
+  searchExpanded: boolean,
+): DnsAnalysisVerdict {
+  if (code === "NOERROR" || code.startsWith("NOERROR")) {
+    return "Succeeded";
+  }
+  if (searchExpanded && code === "NXDOMAIN") {
+    return "Configuration issue";
+  }
+  if (code === "NXDOMAIN") {
+    return "Failed";
+  }
+  if (code === "TIMEOUT" || code.startsWith("TIMEOUT") || code === "SERVFAIL" || code.startsWith("SERVFAIL")) {
+    return "Transient failure";
+  }
+  return "Failed";
+}
+
+export function dnsResolutionStatus(code: string): "Succeeded" | "Failed" | "Unknown" {
+  if (code === "NOERROR" || code.startsWith("NOERROR")) {
+    return "Succeeded";
+  }
+  if (!code || code === "—" || code === "UNKNOWN*") {
+    return "Unknown";
+  }
+  return "Failed";
+}
+
+export function dnsFailureReason(code: string, query: string): {
+  reason?: string;
+  suggestion?: string;
+  searchExpansion?: string[];
+} {
+  const search = dnsSearchExpansion(query);
+  if (code === "NXDOMAIN") {
+    if (search) {
+      return {
+        reason:
+          "The resolver appended the cluster search domain onto a name that already ended in .svc.cluster.local, so the final hostname does not exist.",
+        suggestion: search.suggestion
+          ? `Did you mean ${search.suggestion}?`
+          : undefined,
+        searchExpansion: search.expansion,
+      };
+    }
+    return {
+      reason: "The requested hostname does not exist in DNS.",
+      suggestion: query.includes(CLUSTER_SEARCH)
+        ? undefined
+        : `If this is a cluster service, try ${query.replace(/\.$/, "")}${CLUSTER_SEARCH}`,
+    };
+  }
+  if (code === "SERVFAIL" || code.startsWith("SERVFAIL")) {
+    return { reason: "The DNS server failed to answer (SERVFAIL)." };
+  }
+  if (code === "TIMEOUT" || code.startsWith("TIMEOUT")) {
+    return { reason: "No DNS response was observed before the lookup timed out." };
+  }
+  return {};
+}
+
+export function dnsResolutionPath(row: {
+  source: string;
+  server: string;
+  responseCode: string;
+  answers: string[];
+}): string[] {
+  const steps = [row.source || "client", row.server || "DNS server"];
+  if (row.responseCode && row.responseCode !== "—") {
+    steps.push(row.responseCode);
+  }
+  if (row.answers.length > 0) {
+    steps.push(row.answers[0]);
+  }
+  return steps;
 }
 
 function tcpReason(flow: NetworkFlow): string {
@@ -231,22 +362,41 @@ export function buildDnsRows(flows: NetworkFlow[]): DnsFlowRow[] {
     .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
     .map((flow) => {
       const decoded = Boolean(flow.dnsQuery || flow.dnsRcode || flow.dnsTxid);
+      const responseCode = dnsResponseCode(flow);
+      const query = flow.dnsQuery || "—";
+      const failure = dnsFailureReason(responseCode, query === "—" ? "" : query);
+      const searchExpanded = Boolean(failure.searchExpansion?.length);
+      const source = flow.src.name || flow.src.ip || "—";
+      const server = flow.dst.name || flow.dst.ip || "—";
       return {
         id: flow.id,
         timestamp: flow.timestamp,
-        source: flow.src.name,
+        source,
         sourceNamespace: flow.src.namespace,
-        server: flow.dst.name,
+        sourceIp: flow.src.ip,
+        server,
         serverNamespace: flow.dst.namespace,
-        query: flow.dnsQuery || "—",
+        query,
         type: flow.dnsType || (decoded ? "—" : "—"),
-        responseCode: dnsResponseCode(flow),
+        responseCode,
         answers: flow.dnsAnswers ?? [],
         txid: flow.dnsTxid,
         latencyMs: flow.latencyMs,
         verdict: flow.verdict,
         path: flow.path,
         decoded,
+        reason: failure.reason,
+        suggestion: failure.suggestion,
+        searchExpansion: failure.searchExpansion,
+        searchExpanded,
+        resolutionPath: dnsResolutionPath({
+          source,
+          server,
+          responseCode,
+          answers: flow.dnsAnswers ?? [],
+        }),
+        resolutionStatus: dnsResolutionStatus(responseCode),
+        analysisVerdict: dnsAnalysisVerdict(responseCode, searchExpanded),
       };
     });
 }
@@ -315,6 +465,9 @@ export function buildProtocolRows(
       bytesSent: flow.bytesSent,
       bytesReceived: flow.bytesReceived,
       path: flow.path,
+      httpMethod: flow.httpMethod,
+      httpPath: flow.httpPath,
+      httpStatus: flow.httpStatus,
     }));
 }
 

@@ -10,6 +10,10 @@ import type { NetworkTopology } from "../types/network";
 const DIRECT_COLLECTOR = "http://127.0.0.1:9474";
 
 function flowMergeKey(flow: EbpfFlowPayload): string {
+  if (flow.dns_txid || flow.dns_query) {
+    // Ignore src_ip so CoreDNS-side rows (empty client) merge onto the client observation.
+    return ["dns", String(flow.dns_txid ?? 0), flow.dns_query ?? ""].join("|");
+  }
   return [
     flow.src_ip,
     flow.dst_ip,
@@ -18,6 +22,29 @@ function flowMergeKey(flow: EbpfFlowPayload): string {
     flow.src_pod ?? "",
     flow.dst_pod ?? flow.dst_service ?? "",
   ].join("|");
+}
+
+/** Prefer the observation that still has a client pod (skip empty CoreDNS-side rows). */
+function preferRicherFlow(a: EbpfFlowPayload, b: EbpfFlowPayload): EbpfFlowPayload {
+  const score = (flow: EbpfFlowPayload): number => {
+    let value = 0;
+    if (flow.src_pod) value += 4;
+    if (flow.src_ip) value += 2;
+    if (flow.dns_rcode) value += 1;
+    if (flow.dns_answers && flow.dns_answers.length > 0) value += 1;
+    return value;
+  };
+  const scoreA = score(a);
+  const scoreB = score(b);
+  if (scoreB !== scoreA) {
+    return scoreB > scoreA ? b : a;
+  }
+  const existingTs = Date.parse(a.last_seen ?? a.timestamp ?? "");
+  const nextTs = Date.parse(b.last_seen ?? b.timestamp ?? "");
+  if (!Number.isFinite(existingTs) || nextTs >= existingTs) {
+    return b;
+  }
+  return a;
 }
 
 export class EbpfCollectorClient {
@@ -251,11 +278,7 @@ export class EbpfCollectorClient {
         merged.set(key, flow);
         continue;
       }
-      const existingTs = Date.parse(existing.last_seen ?? existing.timestamp ?? "");
-      const nextTs = Date.parse(flow.last_seen ?? flow.timestamp ?? "");
-      if (!Number.isFinite(existingTs) || nextTs >= existingTs) {
-        merged.set(key, flow);
-      }
+      merged.set(key, preferRicherFlow(existing, flow));
     }
 
     return [...merged.values()].map((flow, index) =>
@@ -293,15 +316,25 @@ export class EbpfCollectorClient {
           }
         : resolveEndpoint(flow.dst_ip, topology);
 
-    const stableId = [
-      "ebpf",
-      src.namespace ?? "",
-      src.name,
-      dst.namespace ?? "",
-      dst.name,
-      flow.protocol ?? "TCP",
-      String(flow.port),
-    ].join(":");
+    const stableId = flow.dns_txid || flow.dns_query
+      ? [
+          "dns",
+          String(flow.dns_txid ?? 0),
+          flow.dns_query ?? "",
+          src.namespace ?? "",
+          src.name,
+          dst.namespace ?? "",
+          dst.name,
+        ].join(":")
+      : [
+          "ebpf",
+          src.namespace ?? "",
+          src.name,
+          dst.namespace ?? "",
+          dst.name,
+          flow.protocol ?? "TCP",
+          String(flow.port),
+        ].join(":");
 
     return {
       id: stableId || `ebpf-${flow.timestamp}-${index}`,
@@ -321,6 +354,11 @@ export class EbpfCollectorClient {
       retransmits: flow.retransmits,
       tcpState: flow.tcp_state,
       tcpEvent: flow.tcp_event,
+      dnsQuery: flow.dns_query,
+      dnsType: flow.dns_type,
+      dnsRcode: flow.dns_rcode,
+      dnsAnswers: flow.dns_answers,
+      dnsTxid: flow.dns_txid,
       httpMethod: flow.http_method,
       httpPath: flow.http_path,
       httpStatus: flow.http_status,
