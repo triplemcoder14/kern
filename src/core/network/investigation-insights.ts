@@ -56,6 +56,9 @@ export interface ProtocolFlowRow {
   bytesSent?: number;
   bytesReceived?: number;
   path?: string;
+  httpMethod?: string;
+  httpPath?: string;
+  httpStatus?: number;
 }
 
 export interface TcpHealthSummary {
@@ -315,6 +318,9 @@ export function buildProtocolRows(
       bytesSent: flow.bytesSent,
       bytesReceived: flow.bytesReceived,
       path: flow.path,
+      httpMethod: flow.httpMethod,
+      httpPath: flow.httpPath,
+      httpStatus: flow.httpStatus,
     }));
 }
 

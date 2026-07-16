@@ -30,6 +30,7 @@ type Flow struct {
 	BytesSent           *uint64   `json:"bytes_sent,omitempty"`
 	BytesReceived       *uint64   `json:"bytes_received,omitempty"`
 	Retransmits         *uint32   `json:"retransmits,omitempty"`
+<<<<<<< Updated upstream
   
 // 	TcpState            string    `json:"tcp_state,omitempty"`
 // 	TcpEvent            string    `json:"tcp_event,omitempty"`
@@ -39,6 +40,14 @@ type Flow struct {
 	DnsRcode            string    `json:"dns_rcode,omitempty"`
 	DnsAnswers          []string  `json:"dns_answers,omitempty"`
 	DnsTxid             uint16    `json:"dns_txid,omitempty"`
+=======
+	TcpState            string    `json:"tcp_state,omitempty"`
+	TcpEvent            string    `json:"tcp_event,omitempty"`
+	// HttpMethod / HttpPath / HttpStatus are filled by the plaintext HTTP sampler.
+	HttpMethod string  `json:"http_method,omitempty"`
+	HttpPath   string  `json:"http_path,omitempty"`
+	HttpStatus *uint16 `json:"http_status,omitempty"`
+>>>>>>> Stashed changes
 }
 
 type FlowStore struct {
@@ -121,6 +130,21 @@ func (s *FlowStore) Upsert(flow Flow) {
 		}
 		if flow.TcpEvent == "" {
 			flow.TcpEvent = existing.TcpEvent
+		}
+		if flow.HttpMethod == "" {
+			flow.HttpMethod = existing.HttpMethod
+		}
+		if flow.HttpPath == "" {
+			flow.HttpPath = existing.HttpPath
+		}
+		if flow.HttpStatus == nil {
+			flow.HttpStatus = existing.HttpStatus
+		}
+		// L4 updates must not erase a plaintext HTTP path annotation.
+		if flow.HttpMethod == "" && flow.HttpPath == "" && flow.HttpStatus == nil &&
+			(existing.HttpMethod != "" || existing.HttpPath != "" || existing.HttpStatus != nil) &&
+			existing.Path != "" {
+			flow.Path = existing.Path
 		}
 		// Retransmit probes should not erase a healthy established verdict.
 		if existing.Verdict == "OK" && flow.Verdict == "RETRY" {
