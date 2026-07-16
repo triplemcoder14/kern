@@ -34,6 +34,8 @@ export interface NetworkFlow {
   httpMethod?: string;
   httpPath?: string;
   httpStatus?: number;
+  grpcMethod?: string;
+  grpcStatus?: number;
 }
 
 export interface NetworkNode {

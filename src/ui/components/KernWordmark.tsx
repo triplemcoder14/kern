@@ -9,6 +9,7 @@ export function KernWordmark({ className = "", showText = true }: KernWordmarkPr
       <span className="kern-logo-mark kern-logo-mark-solid">
         <span className="kern-logo-k">K</span>
       </span>
+      {/* {showText ? <span className="kern-logo-text">KERN</span> : null} */}
       {showText ? <span className="kern-logo-text">ERN</span> : null}
     </span>
   );

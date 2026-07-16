@@ -1,4 +1,5 @@
-/** Port-heuristic app class — inferred only, not protocol inspection. */
+// /** Port-heuristic app class — inferred only, not protocol inspection. */
+/** Port-heuristic app class — overridden when payload decode is present. */
 export type ProtocolClass =
   | "dns"
   | "http"
@@ -24,6 +25,24 @@ const PORT_CLASS: Record<number, ProtocolClass> = {
   9092: "kafka",
 };
 
+/** Protocol identity colors — used when the edge is healthy. */
+export const PROTOCOL_COLORS: Record<ProtocolClass, string> = {
+  dns: "#60a5fa",
+  http: "#34d399",
+  grpc: "#c084fc",
+  postgres: "#2dd4bf",
+  mysql: "#22d3ee",
+  redis: "#f472b6",
+  kafka: "#fb923c",
+  tcp: "#94a3b8",
+  udp: "#a3a3a3",
+  other: "#64748b",
+};
+
+export function protocolStroke(appClass: ProtocolClass): string {
+  return PROTOCOL_COLORS[appClass] ?? PROTOCOL_COLORS.other;
+}
+
 export function inferProtocolClass(
   port: number,
   protocol: string,
@@ -41,14 +60,40 @@ export function inferProtocolClass(
   return "other";
 }
 
-export function protocolClassLabel(value: ProtocolClass): string {
+/** Prefer decoded payload signals over port heuristics. */
+export function resolveProtocolClass(flow: {
+  port: number;
+  protocol: string;
+  dnsQuery?: string;
+  httpMethod?: string;
+  httpPath?: string;
+  httpStatus?: number;
+  grpcMethod?: string;
+  grpcStatus?: number;
+}): ProtocolClass {
+  if (flow.grpcMethod || flow.grpcStatus !== undefined) {
+    return "grpc";
+  }
+  if (flow.httpMethod || flow.httpPath || flow.httpStatus !== undefined) {
+    return "http";
+  }
+  if (flow.dnsQuery) {
+    return "dns";
+  }
+  return inferProtocolClass(flow.port, flow.protocol);
+}
+
+// export function protocolClassLabel(value: ProtocolClass): string {
+export function protocolClassLabel(value: ProtocolClass, decoded = false): string {
   switch (value) {
     case "dns":
       return "DNS";
     case "http":
-      return "HTTP*";
+      // return "HTTP*";
+      return decoded ? "HTTP" : "HTTP*";
     case "grpc":
-      return "gRPC*";
+      // return "gRPC*";
+      return decoded ? "gRPC" : "gRPC*";
     case "postgres":
       return "Postgres*";
     case "mysql":
