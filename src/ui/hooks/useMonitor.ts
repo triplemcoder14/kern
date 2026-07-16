@@ -11,6 +11,7 @@ import type { NetworkSnapshot } from "../../core/types/network";
 import { loadClusterConfig } from "../../core/config/cluster-config";
 import { trimMonitorEvents } from "../../core/monitoring/retention";
 import { getMonitorApiClient } from "../../lib/monitor-api";
+import { isTransientFetchError, isTransientFetchMessage } from "../lib/friendly-errors";
 
 const EMPTY_NETWORK: NetworkSnapshot = {
   topology: { nodes: [], edges: [], updatedAt: "" },
@@ -131,7 +132,9 @@ export function useMonitor() {
           setNamespaces(event.namespaces);
           break;
         case "ERROR":
-          setError(event.message);
+          if (!isTransientFetchMessage(event.message)) {
+            setError(event.message);
+          }
           break;
       }
     });
@@ -139,7 +142,11 @@ export function useMonitor() {
     const config = loadClusterConfig();
     client
       .initSession(config.ebpfCollectorUrl)
-      .catch((err: Error) => setError(err.message));
+      .catch((err: Error) => {
+        if (!isTransientFetchError(err)) {
+          setError(err.message);
+        }
+      });
 
     return unsubscribe;
   }, [client, queueEvent]);
@@ -154,7 +161,9 @@ export function useMonitor() {
         return result;
       } catch (err) {
         const message = err instanceof Error ? err.message : "Failed to connect";
-        setError(message);
+        if (!isTransientFetchMessage(message)) {
+          setError(message);
+        }
         throw err;
       } finally {
         setBusy(false);

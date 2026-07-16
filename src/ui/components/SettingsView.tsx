@@ -10,6 +10,7 @@ import {
   saveRetentionSettings,
   saveStorageSettings,
 } from "../../lib/settings-api";
+import { friendlySettingsLoadError } from "../lib/friendly-errors";
 import type { SavedStorageSettings, StorageSettingsView } from "../../core/types/storage-settings";
 import type { SavedRetentionSettings } from "../../core/types/retention-settings";
 
@@ -233,6 +234,7 @@ export function SettingsView({
   const [saveBusy, setSaveBusy] = useState(false);
   const [saveNote, setSaveNote] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [softNotice, setSoftNotice] = useState<string | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -241,7 +243,12 @@ export function SettingsView({
         setStorage(storageToForm(view));
       })
       .catch((loadError) => {
-        setSaveError(loadError instanceof Error ? loadError.message : "Failed to load storage");
+        const friendly = friendlySettingsLoadError(loadError);
+        if (friendly.soft) {
+          setSoftNotice(friendly.message);
+        } else {
+          setSaveError(friendly.message);
+        }
       });
 
     void fetchRetentionSettings()
@@ -249,7 +256,12 @@ export function SettingsView({
         setRetention(retentionToForm(view));
       })
       .catch((loadError) => {
-        setSaveError(loadError instanceof Error ? loadError.message : "Failed to load retention");
+        const friendly = friendlySettingsLoadError(loadError);
+        if (friendly.soft) {
+          setSoftNotice(friendly.message);
+        } else {
+          setSaveError(friendly.message);
+        }
       });
   }, []);
 
@@ -318,9 +330,20 @@ export function SettingsView({
 
       <div className="settings-stack">
         {saveError ? <div className="settings-alert settings-alert-error">{saveError}</div> : null}
+        {softNotice ? <div className="settings-alert settings-alert-soft">{softNotice}</div> : null}
         {saveNote ? <div className="settings-alert settings-alert-ok">{saveNote}</div> : null}
         {localError || error ? (
-          <div className="settings-alert settings-alert-error">{localError ?? error}</div>
+          <div
+            className={`settings-alert ${
+              (localError ?? error ?? "").toLowerCase().includes("abort")
+                ? "settings-alert-soft"
+                : "settings-alert-error"
+            }`}
+          >
+            {(localError ?? error ?? "").toLowerCase().includes("abort")
+              ? "Unable to refresh settings."
+              : (localError ?? error)}
+          </div>
         ) : null}
 
         <div className="settings-grid-top">

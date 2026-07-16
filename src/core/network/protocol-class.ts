@@ -24,6 +24,24 @@ const PORT_CLASS: Record<number, ProtocolClass> = {
   9092: "kafka",
 };
 
+/** Protocol identity colors — used when the edge is healthy. */
+export const PROTOCOL_COLORS: Record<ProtocolClass, string> = {
+  dns: "#60a5fa",
+  http: "#34d399",
+  grpc: "#c084fc",
+  postgres: "#2dd4bf",
+  mysql: "#22d3ee",
+  redis: "#f472b6",
+  kafka: "#fb923c",
+  tcp: "#94a3b8",
+  udp: "#a3a3a3",
+  other: "#64748b",
+};
+
+export function protocolStroke(appClass: ProtocolClass): string {
+  return PROTOCOL_COLORS[appClass] ?? PROTOCOL_COLORS.other;
+}
+
 export function inferProtocolClass(
   port: number,
   protocol: string,

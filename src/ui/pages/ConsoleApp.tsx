@@ -3,6 +3,7 @@ import { renderCloudPage } from "@kern/platform";
 import { configToConnectInput, loadClusterConfig, saveClusterConfig, type ClusterConfig } from "../../core/config/cluster-config";
 import { ALL_NAMESPACES } from "../../core/monitoring/scope";
 import { isAlertSoundMuted, setAlertSoundMuted, unlockAlertSound } from "../lib/alert-sound";
+import { friendlyMonitorError } from "../lib/friendly-errors";
 import { AppShell, type NavId, type NavPage } from "../components/AppShell";
 import { AlertsDashboard } from "../components/AlertsDashboard";
 import { LiveEventStream } from "../components/LiveEventStream";
@@ -16,11 +17,20 @@ import { useMonitor } from "../hooks/useMonitor";
 import { useNetworkTalkAlertSound } from "../hooks/useNetworkTalkAlertSound";
 
 function networkTabForPage(page: NavPage): NetworkWorkspaceTab {
-  if (page === "topology") {
+  if (page === "topology" || page === "network-map") {
     return "map";
   }
-  if (page === "flows") {
+  if (page === "flows" || page === "network-flows") {
     return "flows";
+  }
+  if (page === "network-dns") {
+    return "dns";
+  }
+  if (page === "network-tcp") {
+    return "tcp";
+  }
+  if (page === "network-protocols") {
+    return "protocols";
   }
   return "overview";
 }
@@ -69,7 +79,16 @@ export function ConsoleApp() {
   });
 
   const handleNavigate = (nav: NavId, nextPage: NavPage) => {
-    if (nextPage === "topology" || nextPage === "flows" || nextPage === "network") {
+    if (
+      nextPage === "topology" ||
+      nextPage === "flows" ||
+      nextPage === "network" ||
+      nextPage === "network-map" ||
+      nextPage === "network-dns" ||
+      nextPage === "network-tcp" ||
+      nextPage === "network-flows" ||
+      nextPage === "network-protocols"
+    ) {
       setNetworkTab(networkTabForPage(nextPage));
       setActiveNav("network");
       setPage("network");
@@ -101,9 +120,22 @@ export function ConsoleApp() {
       onSoundMutedChange={handleSoundMutedChange}
       user={user}
       onLogout={handleLogout}
+      agentConnected={monitor.health.connected}
+      ebpfMode={monitor.network.ebpf.mode}
+      programsAttached={monitor.network.ebpf.programsAttached}
+      flowsPerSecond={monitor.network.ebpf.flowsPerSecond}
+      ebpfConnected={monitor.network.ebpf.connected}
       footer={
         monitor.error ? (
-          <span className="shell-footer-error">{monitor.error}</span>
+          <span
+            className={
+              friendlyMonitorError(monitor.error).soft
+                ? "shell-footer-soft"
+                : "shell-footer-error"
+            }
+          >
+            {friendlyMonitorError(monitor.error).message}
+          </span>
         ) : monitor.busy ? (
           <span>Connecting…</span>
         ) : monitor.health.connected ? (
