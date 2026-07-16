@@ -74,3 +74,7 @@ Environment:
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `HUBBLE_RELAY` | `hubble-relay.kube-system.svc.cluster.local:4245` | Hubble relay (optional future build) |
+| `KERN_STACK_SAMPLER` | on | Set to `0` to disable the eBPF CPU stack sampler |
+| `KERN_PPROF_ADDR` | unset | Opt-in pprof listener, e.g. `:6060` |
+
+CPU stack sampling (ebpf builds) uses `sched_switch` rate-limited to ~100 Hz per CPU. Kallsyms lookup is deferred and binary-searched. Do not treat a throttled `200m` CFS ceiling as the agent’s true steady-state footprint until you have measured an unthrottled build with these fixes.

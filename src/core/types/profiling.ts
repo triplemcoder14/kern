@@ -26,13 +26,37 @@ export interface KernelMemory {
   pageReclaim?: string;
 }
 
+export type MemoryRssSource = "cgroup" | "metrics" | "proc" | "unknown";
+
 export interface PodConsumer {
   namespace: string;
   pod: string;
   cpuPercent?: number;
+  /** Resident / current usage when known (cgroup or metrics). */
   rssMb?: number;
+  /** Working set (usually metrics-server usage; reclaim-aware proxy). */
+  workingSetMb?: number;
+  anonymousMb?: number;
   cacheMb?: number;
+  majorFaults?: number;
+  minorFaults?: number;
+  /** @deprecated Prefer majorFaults; kept for agent JSON compat. */
   pageFaultsPerMin?: number;
+  memoryLimitMb?: number;
+  /** Delta vs previous sample window (MB). */
+  growthMb?: number;
+  rssSource?: MemoryRssSource;
+}
+
+export interface ContainerConsumer {
+  namespace: string;
+  pod: string;
+  container: string;
+  workingSetMb?: number;
+  rssMb?: number;
+  memoryLimitMb?: number;
+  growthMb?: number;
+  rssSource?: MemoryRssSource;
 }
 
 export interface ProcessSample {
@@ -42,6 +66,7 @@ export interface ProcessSample {
   pod?: string;
   cpuPercent?: number;
   rssMb?: number;
+  growthMb?: number;
 }
 
 export interface KernelHotspot {
@@ -81,12 +106,38 @@ export interface ProfileMetric {
 
 export type ProfileStackSource = "proc" | "inferred" | "ebpf";
 
+export type ProfileStackFrameKind =
+  | "root"
+  | "protocol"
+  | "endpoint"
+  | "workload"
+  | "service"
+  | "hop";
+
 export interface ProfileStackFrame {
+  id?: string;
   label: string;
+  /** Secondary line: namespace, IP, or port detail */
+  subtitle?: string;
   depth: number;
   width: number;
   offset: number;
   heat: number;
+  kind?: ProfileStackFrameKind;
+  protocol?: string;
+  port?: number;
+  namespace?: string;
+  endpointKind?: string;
+  ip?: string;
+  bytes?: number;
+  retransmits?: number;
+  latencyMs?: number;
+  /** Share of total contribution (0–100) */
+  sharePct?: number;
+  /** Sample count when available (CPU flame) */
+  samples?: number;
+  path?: string;
+  flowCount?: number;
 }
 
 export interface ProfileLogLine {
@@ -117,6 +168,7 @@ export interface NodeProfileDetail {
   memoryDetail: MemoryDetail;
   kernelMemory: KernelMemory;
   topPods: PodConsumer[];
+  topContainers?: ContainerConsumer[];
   topProcesses: ProcessSample[];
   kernelHotspots: KernelHotspot[];
   timeline: TimelineEvent[];
@@ -166,8 +218,13 @@ export interface AgentProfilePayload {
     pod: string;
     cpu_percent?: number;
     rss_mb?: number;
+    working_set_mb?: number;
+    anonymous_mb?: number;
     cache_mb?: number;
     page_faults_per_min?: number;
+    major_faults?: number;
+    minor_faults?: number;
+    memory_limit_mb?: number;
   }>;
   top_processes?: Array<{
     pid: number;

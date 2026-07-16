@@ -5,6 +5,7 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -20,7 +21,7 @@ const defaultHubbleRelay = "hubble-relay.kube-system.svc.cluster.local:4245"
 
 func main() {
 	addr := flag.String("addr", ":9474", "listen address")
-	mode := flag.String("mode", "auto", "flow source: auto, proc, hubble")
+	mode := flag.String("mode", "ebpf", "flow source: ebpf (default), auto, proc (emergency), hubble")
 	hubbleRelay := flag.String("hubble-relay", envOr("HUBBLE_RELAY", defaultHubbleRelay), "Hubble relay gRPC address")
 	flag.Parse()
 
@@ -28,6 +29,7 @@ func main() {
 	defer cancel()
 
 	flows := store.NewFlowStore()
+	tables := store.NewTableStore()
 	tracer := trace.NewTracer(*mode, *hubbleRelay)
 
 	resolver, err := k8s.NewResolver()
@@ -44,15 +46,24 @@ func main() {
 
 	go func() {
 		if err := tracer.Start(ctx, resolver, flows); err != nil && ctx.Err() == nil {
-			log.Printf("tracer stopped: %v", err)
+			log.Fatalf("tracer failed: %v", err)
 		}
 	}()
 
-	server := api.NewServer(flows, tracer, resolver)
+	server := api.NewServer(flows, tables, tracer, resolver)
 	httpServer := &http.Server{
 		Addr:              *addr,
 		Handler:           server.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	if pprofAddr := os.Getenv("KERN_PPROF_ADDR"); pprofAddr != "" {
+		go func() {
+			log.Printf("pprof listening on %s", pprofAddr)
+			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+				log.Printf("pprof server stopped: %v", err)
+			}
+		}()
 	}
 
 	go func() {

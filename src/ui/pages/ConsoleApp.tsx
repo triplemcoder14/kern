@@ -1,27 +1,37 @@
 import { useState } from "react";
 import { renderCloudPage } from "@kern/platform";
 import { configToConnectInput, loadClusterConfig, saveClusterConfig, type ClusterConfig } from "../../core/config/cluster-config";
+import { ALL_NAMESPACES } from "../../core/monitoring/scope";
 import { isAlertSoundMuted, setAlertSoundMuted, unlockAlertSound } from "../lib/alert-sound";
 import { AppShell, type NavId, type NavPage } from "../components/AppShell";
 import { AlertsDashboard } from "../components/AlertsDashboard";
-import { FlowsDashboard } from "../components/FlowsDashboard";
 import { LiveEventStream } from "../components/LiveEventStream";
-import { NetworkAnalysisDashboard } from "../components/NetworkAnalysisDashboard";
+import { NetworkWorkspace, type NetworkWorkspaceTab } from "../components/network/NetworkWorkspace";
 import { OverviewDashboard } from "../components/OverviewDashboard";
 import { ProfilingDashboard } from "../components/ProfilingDashboard";
 import { SettingsView } from "../components/SettingsView";
-import { TopologyDashboard } from "../components/TopologyDashboard";
 import { WorkloadsDashboard } from "../components/WorkloadsDashboard";
 import { useAuth } from "../hooks/useAuth";
 import { useMonitor } from "../hooks/useMonitor";
 import { useNetworkTalkAlertSound } from "../hooks/useNetworkTalkAlertSound";
+
+function networkTabForPage(page: NavPage): NetworkWorkspaceTab {
+  if (page === "topology") {
+    return "map";
+  }
+  if (page === "flows") {
+    return "flows";
+  }
+  return "overview";
+}
 
 export function ConsoleApp() {
   const monitor = useMonitor();
   const { user, logout } = useAuth();
   const [page, setPage] = useState<NavPage>("overview");
   const [activeNav, setActiveNav] = useState<NavId>("overview");
-  const [namespace, setNamespace] = useState("all");
+  const [networkTab, setNetworkTab] = useState<NetworkWorkspaceTab>("overview");
+  const [namespace, setNamespace] = useState(ALL_NAMESPACES);
   const [paused, setPaused] = useState(false);
   const [soundMuted, setSoundMuted] = useState(isAlertSoundMuted);
 
@@ -35,12 +45,21 @@ export function ConsoleApp() {
     }
   };
 
+  const handleNamespaceChange = (value: string) => {
+    const next = value.trim() || ALL_NAMESPACES;
+    setNamespace(next);
+    void monitor.setNamespace(next);
+  };
+
   const handleConnect = async (config: ClusterConfig) => {
     saveClusterConfig(config);
     await monitor.connect(configToConnectInput(config));
+    // Keep UI + monitor worker scope in lockstep after connect.
+    setNamespace(ALL_NAMESPACES);
+    void monitor.setNamespace(ALL_NAMESPACES);
   };
 
-  const savedClusterName = loadClusterConfig().clusterName.trim() || "minikube";
+  const savedClusterName = loadClusterConfig().clusterName.trim() || "cluster";
   const clusterName = monitor.connection?.clusterName?.trim()
     || (monitor.health.connected ? monitor.health.clusterName : savedClusterName)
     || savedClusterName;
@@ -50,6 +69,12 @@ export function ConsoleApp() {
   });
 
   const handleNavigate = (nav: NavId, nextPage: NavPage) => {
+    if (nextPage === "topology" || nextPage === "flows" || nextPage === "network") {
+      setNetworkTab(networkTabForPage(nextPage));
+      setActiveNav("network");
+      setPage("network");
+      return;
+    }
     setActiveNav(nav);
     setPage(nextPage);
   };
@@ -62,7 +87,7 @@ export function ConsoleApp() {
     clusterName,
     namespace,
     namespaces: monitor.namespaces,
-    onNamespaceChange: setNamespace,
+    onNamespaceChange: handleNamespaceChange,
     connected: monitor.health.connected,
   };
 
@@ -102,14 +127,12 @@ export function ConsoleApp() {
         />
       )}
 
-      {page === "topology" && (
-        <div className="topology-page-wrap">
-          <TopologyDashboard snapshot={monitor.network} {...clusterPageProps} />
-        </div>
-      )}
-
-      {page === "flows" && (
-        <FlowsDashboard snapshot={monitor.network} {...clusterPageProps} />
+      {page === "network" && (
+        <NetworkWorkspace
+          snapshot={monitor.network}
+          initialTab={networkTab}
+          {...clusterPageProps}
+        />
       )}
 
       {page === "workloads" && (
@@ -118,13 +141,9 @@ export function ConsoleApp() {
           events={monitor.events}
           incidents={monitor.incidents}
           namespaceFilter={namespace}
-          onViewInNetwork={() => handleNavigate("topology", "topology")}
+          onViewInNetwork={() => handleNavigate("network", "topology")}
           {...clusterPageProps}
         />
-      )}
-
-      {page === "network" && (
-        <NetworkAnalysisDashboard snapshot={monitor.network} {...clusterPageProps} />
       )}
 
       {page === "profiling" && <ProfilingDashboard {...clusterPageProps} />}

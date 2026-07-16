@@ -1,12 +1,24 @@
 import type { K8sApiClient } from "../k8s-api/client";
 import {
   fetchAgentViaPodProxy,
+  fetchAllAgentJson,
 } from "../k8s-api/agent-access";
 import type { EbpfCollectorStatus, EbpfFlowPayload, NetworkFlow } from "../types/network";
 import { resolveEndpoint } from "./topology";
 import type { NetworkTopology } from "../types/network";
 
 const DIRECT_COLLECTOR = "http://127.0.0.1:9474";
+
+function flowMergeKey(flow: EbpfFlowPayload): string {
+  return [
+    flow.src_ip,
+    flow.dst_ip,
+    flow.protocol ?? "TCP",
+    String(flow.port),
+    flow.src_pod ?? "",
+    flow.dst_pod ?? flow.dst_service ?? "",
+  ].join("|");
+}
 
 export class EbpfCollectorClient {
   private collectorUrl: string;
@@ -113,37 +125,49 @@ export class EbpfCollectorClient {
           message: formatModeMessage(body.mode, body.message ?? "agent live"),
         };
       } catch (error) {
-        lastError =
-          error instanceof Error && error.name === "AbortError"
-            ? `Collector timed out at ${root}`
-            : error instanceof Error
-              ? `${error.message} (${root})`
-              : `Failed to reach ${root}`;
+        lastError = error instanceof Error ? error.message : `Failed at ${root}`;
       }
     }
 
     if (k8s) {
       try {
-        const proxied = await fetchAgentViaPodProxy(k8s, "/health", { timeoutMs: 6_000 });
-        if (proxied) {
-          const body = (await proxied.response.json()) as {
-            programs?: number;
-            flows_per_second?: number;
-            mode?: string;
-            message?: string;
-            pods_indexed?: number;
-            services_indexed?: number;
-          };
-          const via = `${proxied.pod.namespace}/${proxied.pod.name}`;
+        const agents = await fetchAllAgentJson<{
+          programs?: number;
+          flows_per_second?: number;
+          mode?: string;
+          message?: string;
+          pods_indexed?: number;
+          services_indexed?: number;
+          ok?: boolean;
+        }>(k8s, "/health", { timeoutMs: 4000 });
+
+        if (agents.length > 0) {
+          const primary = agents[0].body;
+          const podsIndexed = agents.reduce(
+            (sum, item) => sum + (item.body.pods_indexed ?? 0),
+            0,
+          );
+          const flowsPerSecond = agents.reduce(
+            (sum, item) => sum + (item.body.flows_per_second ?? 0),
+            0,
+          );
+          const programs = agents.reduce(
+            (sum, item) => sum + (item.body.programs ?? 0),
+            0,
+          );
+          const via = `pod-proxy ×${agents.length}`;
           return {
             connected: true,
             collectorUrl: via,
-            mode: body.mode,
-            programsAttached: body.programs,
-            flowsPerSecond: body.flows_per_second,
-            podsIndexed: body.pods_indexed,
-            servicesIndexed: body.services_indexed,
-            message: formatModeMessage(body.mode, body.message ?? `agent live via ${via}`),
+            mode: primary.mode,
+            programsAttached: programs || primary.programs,
+            flowsPerSecond,
+            podsIndexed: podsIndexed || primary.pods_indexed,
+            servicesIndexed: primary.services_indexed,
+            message: formatModeMessage(
+              primary.mode,
+              `live from ${agents.length} agent(s)`,
+            ),
           };
         }
       } catch (error) {
@@ -160,15 +184,70 @@ export class EbpfCollectorClient {
   }
 
   async fetchFlows(topology: NetworkTopology, k8s: K8sApiClient | null = null): Promise<NetworkFlow[]> {
-    const payload = await this.fetchAgentJson<{ flows?: EbpfFlowPayload[] }>(
-      "/api/v1/flows",
-      k8s,
-      5000,
-    );
-    if (!payload) {
-      return [];
+    const payloads: EbpfFlowPayload[] = [];
+
+    for (const root of this.candidateRoots()) {
+      if (!root.startsWith("http")) {
+        continue;
+      }
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5000);
+        const response = await fetch(this.resolveUrl("/api/v1/flows", root), {
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+        if (response.ok) {
+          const body = (await response.json()) as { flows?: EbpfFlowPayload[] };
+          payloads.push(...(body.flows ?? []));
+        }
+      } catch {
+        // try next / pod proxy
+      }
     }
-    return (payload.body.flows ?? []).map((flow, index) =>
+
+    if (k8s) {
+      const agents = await fetchAllAgentJson<{ flows?: EbpfFlowPayload[] }>(
+        k8s,
+        "/api/v1/flows",
+        { timeoutMs: 5000 },
+      );
+      for (const agent of agents) {
+        payloads.push(...(agent.body.flows ?? []));
+      }
+    }
+
+    if (payloads.length === 0) {
+      // Fall back to single-agent fetch (covers relative /ebpf-api roots).
+      const payload = await this.fetchAgentJson<{ flows?: EbpfFlowPayload[] }>(
+        "/api/v1/flows",
+        k8s,
+        5000,
+      );
+      if (!payload) {
+        return [];
+      }
+      return (payload.body.flows ?? []).map((flow, index) =>
+        this.toNetworkFlow(flow, topology, index),
+      );
+    }
+
+    const merged = new Map<string, EbpfFlowPayload>();
+    for (const flow of payloads) {
+      const key = flowMergeKey(flow);
+      const existing = merged.get(key);
+      if (!existing) {
+        merged.set(key, flow);
+        continue;
+      }
+      const existingTs = Date.parse(existing.last_seen ?? existing.timestamp ?? "");
+      const nextTs = Date.parse(flow.last_seen ?? flow.timestamp ?? "");
+      if (!Number.isFinite(existingTs) || nextTs >= existingTs) {
+        merged.set(key, flow);
+      }
+    }
+
+    return [...merged.values()].map((flow, index) =>
       this.toNetworkFlow(flow, topology, index),
     );
   }
@@ -203,8 +282,18 @@ export class EbpfCollectorClient {
           }
         : resolveEndpoint(flow.dst_ip, topology);
 
+    const stableId = [
+      "ebpf",
+      src.namespace ?? "",
+      src.name,
+      dst.namespace ?? "",
+      dst.name,
+      flow.protocol ?? "TCP",
+      String(flow.port),
+    ].join(":");
+
     return {
-      id: `ebpf-${flow.timestamp}-${index}`,
+      id: stableId || `ebpf-${flow.timestamp}-${index}`,
       timestamp: flow.timestamp,
       firstSeen: flow.first_seen,
       lastSeen: flow.last_seen,

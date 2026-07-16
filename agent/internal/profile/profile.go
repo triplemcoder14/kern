@@ -7,11 +7,26 @@ import (
 )
 
 type StackFrame struct {
-	Label  string  `json:"label"`
-	Depth  int     `json:"depth"`
-	Width  float64 `json:"width"`
-	Offset float64 `json:"offset"`
-	Heat   float64 `json:"heat"`
+	ID           string  `json:"id,omitempty"`
+	Label        string  `json:"label"`
+	Subtitle     string  `json:"subtitle,omitempty"`
+	Depth        int     `json:"depth"`
+	Width        float64 `json:"width"`
+	Offset       float64 `json:"offset"`
+	Heat         float64 `json:"heat"`
+	Kind         string  `json:"kind,omitempty"`
+	Protocol     string  `json:"protocol,omitempty"`
+	Port         uint16  `json:"port,omitempty"`
+	Namespace    string  `json:"namespace,omitempty"`
+	EndpointKind string  `json:"endpointKind,omitempty"`
+	IP           string  `json:"ip,omitempty"`
+	Bytes        uint64  `json:"bytes,omitempty"`
+	Retransmits  uint32  `json:"retransmits,omitempty"`
+	LatencyMs    uint32  `json:"latencyMs,omitempty"`
+	SharePct     int     `json:"sharePct,omitempty"`
+	Samples      int     `json:"samples,omitempty"`
+	Path         string  `json:"path,omitempty"`
+	FlowCount    int     `json:"flowCount,omitempty"`
 }
 
 type LogLine struct {
@@ -65,12 +80,17 @@ type KernelMemory struct {
 }
 
 type PodConsumer struct {
-	Namespace   string  `json:"namespace"`
-	Pod         string  `json:"pod"`
-	CPUPercent  float64 `json:"cpu_percent,omitempty"`
-	RSSMB       uint64  `json:"rss_mb,omitempty"`
-	CacheMB     uint64  `json:"cache_mb,omitempty"`
-	PageFaults  uint64  `json:"page_faults_per_min,omitempty"`
+	Namespace     string  `json:"namespace"`
+	Pod           string  `json:"pod"`
+	CPUPercent    float64 `json:"cpu_percent,omitempty"`
+	RSSMB         uint64  `json:"rss_mb,omitempty"`
+	WorkingSetMB  uint64  `json:"working_set_mb,omitempty"`
+	AnonymousMB   uint64  `json:"anonymous_mb,omitempty"`
+	CacheMB       uint64  `json:"cache_mb,omitempty"`
+	PageFaults    uint64  `json:"page_faults_per_min,omitempty"`
+	MajorFaults   uint64  `json:"major_faults,omitempty"`
+	MinorFaults   uint64  `json:"minor_faults,omitempty"`
+	MemoryLimitMB uint64  `json:"memory_limit_mb,omitempty"`
 }
 
 type ProcessSample struct {
@@ -80,6 +100,16 @@ type ProcessSample struct {
 	Pod        string  `json:"pod,omitempty"`
 	CPUPercent float64 `json:"cpu_percent,omitempty"`
 	RSSMB      uint64  `json:"rss_mb,omitempty"`
+}
+
+type cgroupMemStats struct {
+	path        string
+	currentKB   uint64
+	anonKB      uint64
+	fileKB      uint64
+	majorFaults uint64
+	minorFaults uint64
+	limitKB     uint64 // 0 means unlimited / unknown
 }
 
 type KernelHotspot struct {

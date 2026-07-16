@@ -1,5 +1,49 @@
 import type { ClusterConnectionConfig } from "../types/monitoring";
 import { ALL_NAMESPACES, resolveK8sNamespace, type MonitorNamespaceScope } from "../monitoring/scope";
+import { resolveKubeContextName } from "../kubeconfig/resolve-context";
+
+const KUBECTL_PROXY_PORT = 8001;
+
+function kubectlProxyHint(): string {
+  const context = resolveKubeContextName();
+  if (context) {
+    return `Start kubectl proxy: kubectl proxy --port=${KUBECTL_PROXY_PORT} --context=${context}`;
+  }
+  return `Start kubectl proxy: kubectl proxy --port=${KUBECTL_PROXY_PORT}`;
+}
+
+function isLocalKubectlProxy(proxyUrl: string): boolean {
+  try {
+    const parsed = new URL(proxyUrl.startsWith("http") ? proxyUrl : `http://${proxyUrl}`);
+    const host = parsed.hostname;
+    const port = parsed.port || (parsed.protocol === "https:" ? "443" : "80");
+    const localHost =
+      host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]";
+    return localHost && port === String(KUBECTL_PROXY_PORT);
+  } catch {
+    return /127\.0\.0\.1:8001|localhost:8001/.test(proxyUrl);
+  }
+}
+
+function unauthorizedProxyHint(proxyUrl: string): string {
+  if (isLocalKubectlProxy(proxyUrl)) {
+    return [
+      "Unauthorized from kubectl proxy.",
+      "Restart it with your active context:",
+      `kubectl proxy --port=${KUBECTL_PROXY_PORT}`,
+      "If Settings → Advanced has a Bearer token, clear it — local proxy already authenticates via kubeconfig.",
+    ].join(" ");
+  }
+  return "Unauthorized — check the Bearer token / kubeconfig credentials for this cluster.";
+}
+
+function deadProxyClusterHint(): string {
+  const context = resolveKubeContextName();
+  if (context) {
+    return `kubectl proxy is pointing at a dead cluster (context: ${context}). Check kubectl config get-contexts, then restart: kubectl proxy --port=${KUBECTL_PROXY_PORT} --context=<your-context>`;
+  }
+  return `kubectl proxy is pointing at a dead cluster. Check kubectl config current-context, then: kubectl proxy --port=${KUBECTL_PROXY_PORT}`;
+}
 
 interface ListMeta {
   resourceVersion?: string;
@@ -55,7 +99,12 @@ interface K8sPodObject {
   spec?: {
     nodeName?: string;
     containers?: Array<{
+      name?: string;
       ports?: Array<{ containerPort: number; protocol?: string }>;
+      resources?: {
+        limits?: { memory?: string; cpu?: string };
+        requests?: { memory?: string; cpu?: string };
+      };
     }>;
   };
   status?: {
@@ -140,6 +189,24 @@ export interface K8sPodMetricSummary {
   name: string;
   cpuUsageNano?: number;
   memoryUsedKi?: number;
+  containers?: Array<{
+    name: string;
+    cpuUsageNano?: number;
+    memoryUsedKi?: number;
+  }>;
+}
+
+/** Kubelet /stats/summary pod memory (bytes already converted to MiB in helpers). */
+export interface K8sPodMemoryStat {
+  namespace: string;
+  name: string;
+  rssMb?: number;
+  workingSetMb?: number;
+  containers?: Array<{
+    name: string;
+    rssMb?: number;
+    workingSetMb?: number;
+  }>;
 }
 
 export class K8sApiClient {
@@ -157,7 +224,9 @@ export class K8sApiClient {
     const headers: Record<string, string> = {
       Accept: "application/json",
     };
-    if (this.config.token) {
+    // Local kubectl proxy already authenticates with kubeconfig (certs/exec).
+    // A leftover Bearer token (e.g. from OpenShift) overrides that and causes 401.
+    if (this.config.token && !isLocalKubectlProxy(this.config.proxyUrl)) {
       headers.Authorization = `Bearer ${this.config.token}`;
     }
     return headers;
@@ -195,22 +264,23 @@ export class K8sApiClient {
     try {
       response = await this.fetchWithTimeout("/version");
     } catch (error) {
-      const hint = "Start kubectl proxy: kubectl proxy --port=8001 --context=minikube";
       const detail =
         error instanceof Error && error.name === "AbortError"
           ? "timed out after 10s"
           : error instanceof Error
             ? error.message
             : "network error";
-      throw new Error(`${hint} (${detail})`);
+      throw new Error(`${kubectlProxyHint()} (${detail})`);
     }
 
     if (!response.ok) {
       const body = await response.text();
-      const hint =
-        body.includes("no such host") || body.includes("dial tcp")
-          ? "kubectl proxy is pointing at a dead cluster. Run: kubectl config use-context minikube && kubectl proxy --port=8001 --context=minikube"
-          : body.trim() || response.statusText;
+      let hint = body.trim() || response.statusText;
+      if (body.includes("no such host") || body.includes("dial tcp")) {
+        hint = deadProxyClusterHint();
+      } else if (response.status === 401 || body.includes("Unauthorized")) {
+        hint = unauthorizedProxyHint(this.config.proxyUrl);
+      }
       throw new Error(`Cluster unreachable (${response.status}): ${hint}`);
     }
 
@@ -253,10 +323,26 @@ export class K8sApiClient {
     try {
       const nodes = await this.listNodes();
       if (nodes.length > 0) {
-        const first = nodes[0]?.name ?? "";
+        const names = nodes.map((node) => node.name).filter(Boolean);
+        const first = names[0] ?? "";
+
+        // Single-node local engines (minikube / kind / k3d) often use that engine name.
+        if (names.length === 1 && /^(minikube|kind|k3d|docker-desktop)/i.test(first)) {
+          return first;
+        }
+
+        // Multipass / kubeadm style hostnames: k8s-cp, k8s-w1, …
+        if (names.some((name) => /^k8s-/i.test(name))) {
+          return `kubeadm (${names.length} nodes)`;
+        }
+
         const parts = first.split(".");
         if (parts.length >= 3) {
           return parts.slice(-3).join(".");
+        }
+
+        if (names.length > 1) {
+          return `${first} (+${names.length - 1})`;
         }
       }
     } catch {
@@ -428,28 +514,98 @@ export class K8sApiClient {
     }
     const body = (await response.json()) as K8sList<{
       metadata: { name: string; namespace?: string };
-      containers?: Array<{ usage?: { cpu?: string; memory?: string } }>;
+      containers?: Array<{ name?: string; usage?: { cpu?: string; memory?: string } }>;
     }>;
     return (body.items ?? []).map((item) => {
       let cpuNano = 0;
       let memoryKi = 0;
-      for (const container of item.containers ?? []) {
-        cpuNano += parseNanoCpu(container.usage?.cpu) ?? 0;
-        memoryKi += parseKiQuantity(container.usage?.memory) ?? 0;
-      }
+      const containers = (item.containers ?? []).map((container) => {
+        const containerCpu = parseNanoCpu(container.usage?.cpu) ?? 0;
+        const containerMem = parseKiQuantity(container.usage?.memory) ?? 0;
+        cpuNano += containerCpu;
+        memoryKi += containerMem;
+        return {
+          name: container.name ?? "container",
+          cpuUsageNano: containerCpu > 0 ? containerCpu : undefined,
+          memoryUsedKi: containerMem > 0 ? containerMem : undefined,
+        };
+      });
       return {
         namespace: item.metadata.namespace ?? "default",
         name: item.metadata.name,
         cpuUsageNano: cpuNano > 0 ? cpuNano : undefined,
         memoryUsedKi: memoryKi > 0 ? memoryKi : undefined,
+        containers,
       };
     });
+  }
+
+  /**
+   * Per-pod RSS / working set from kubelet stats/summary.
+   * Preferred when metrics-server is missing or incomplete.
+   */
+  async listNodePodMemoryStats(nodeName: string): Promise<K8sPodMemoryStat[]> {
+    const path = `/api/v1/nodes/${encodeURIComponent(nodeName)}/proxy/stats/summary`;
+    const response = await this.fetchWithTimeout(path, {}, LIST_FETCH_TIMEOUT_MS);
+    if (!response.ok) {
+      return [];
+    }
+    const body = (await response.json()) as {
+      pods?: Array<{
+        podRef?: { name?: string; namespace?: string };
+        memory?: {
+          rssBytes?: number;
+          workingSetBytes?: number;
+          usageBytes?: number;
+        };
+        containers?: Array<{
+          name?: string;
+          memory?: {
+            rssBytes?: number;
+            workingSetBytes?: number;
+            usageBytes?: number;
+          };
+        }>;
+      }>;
+    };
+
+    const out: K8sPodMemoryStat[] = [];
+    for (const pod of body.pods ?? []) {
+      const name = pod.podRef?.name?.trim() ?? "";
+      const namespace = pod.podRef?.namespace?.trim() ?? "default";
+      if (!name) {
+        continue;
+      }
+      const containers: NonNullable<K8sPodMemoryStat["containers"]> = [];
+      for (const container of pod.containers ?? []) {
+        const containerName = container.name?.trim() ?? "";
+        if (!containerName) {
+          continue;
+        }
+        containers.push({
+          name: containerName,
+          rssMb: bytesToMb(container.memory?.rssBytes),
+          workingSetMb:
+            bytesToMb(container.memory?.workingSetBytes) ??
+            bytesToMb(container.memory?.usageBytes),
+        });
+      }
+      out.push({
+        namespace,
+        name,
+        rssMb: bytesToMb(pod.memory?.rssBytes),
+        workingSetMb:
+          bytesToMb(pod.memory?.workingSetBytes) ?? bytesToMb(pod.memory?.usageBytes),
+        containers,
+      });
+    }
+    return out;
   }
 
   async listPodsOnNode(
     nodeName: string,
     namespace?: MonitorNamespaceScope,
-  ): Promise<Array<{ namespace: string; name: string; nodeName: string }>> {
+  ): Promise<Array<{ namespace: string; name: string; nodeName: string; memoryLimitMb?: number }>> {
     const nsPath = this.namespacePath(namespace);
     const query = new URLSearchParams({
       fieldSelector: `spec.nodeName=${nodeName}`,
@@ -469,6 +625,7 @@ export class K8sApiClient {
         namespace: pod.metadata.namespace ?? "default",
         name: pod.metadata.name,
         nodeName: pod.spec?.nodeName ?? nodeName,
+        memoryLimitMb: sumPodMemoryLimitMb(pod),
       }))
       .filter((pod) => pod.name.length > 0);
   }
@@ -615,12 +772,62 @@ function parseCapacityMemoryMi(value: string): number {
   return 0;
 }
 
+function sumPodMemoryLimitMb(pod: K8sPodObject): number | undefined {
+  let total = 0;
+  let found = false;
+  for (const container of pod.spec?.containers ?? []) {
+    const raw = container.resources?.limits?.memory;
+    if (!raw) {
+      continue;
+    }
+    const mb = parseCapacityMemoryMi(raw);
+    if (mb > 0) {
+      total += mb;
+      found = true;
+    }
+  }
+  return found ? total : undefined;
+}
+
 function parseKiQuantity(value?: string): number | undefined {
   if (!value) {
     return undefined;
   }
-  const numeric = Number.parseInt(value, 10);
-  return Number.isFinite(numeric) ? numeric : undefined;
+  const trimmed = value.trim();
+  const numeric = Number.parseFloat(trimmed);
+  if (!Number.isFinite(numeric)) {
+    return undefined;
+  }
+  if (trimmed.endsWith("Ki")) {
+    return Math.round(numeric);
+  }
+  if (trimmed.endsWith("Mi")) {
+    return Math.round(numeric * 1024);
+  }
+  if (trimmed.endsWith("Gi")) {
+    return Math.round(numeric * 1024 * 1024);
+  }
+  if (trimmed.endsWith("Ti")) {
+    return Math.round(numeric * 1024 * 1024 * 1024);
+  }
+  if (trimmed.endsWith("k")) {
+    return Math.round(numeric / 1024);
+  }
+  if (trimmed.endsWith("M")) {
+    return Math.round((numeric * 1000 * 1000) / 1024);
+  }
+  if (trimmed.endsWith("G")) {
+    return Math.round((numeric * 1000 * 1000 * 1000) / 1024);
+  }
+  // Bare number from metrics APIs is usually bytes.
+  return Math.round(numeric / 1024);
+}
+
+function bytesToMb(bytes?: number): number | undefined {
+  if (bytes === undefined || !Number.isFinite(bytes) || bytes < 0) {
+    return undefined;
+  }
+  return Math.round(bytes / (1024 * 1024));
 }
 
 function parseNanoCpu(value?: string): number | undefined {

@@ -5,10 +5,14 @@ import {
   buildTopology,
   flowFromNetworkEvent,
 } from "../core/network/topology";
+import { retentionPolicy } from "../core/monitoring/retention";
+import {
+  ALL_NAMESPACES,
+  type MonitorNamespaceScope,
+} from "../core/monitoring/scope";
 import type { MonitorEvent } from "../core/types/monitoring";
 import type { NetworkFlow, NetworkSnapshot, NetworkTopology } from "../core/types/network";
 
-const MAX_FLOWS = 200;
 const POLL_MS = 8_000;
 
 export class NetworkEngine {
@@ -17,6 +21,8 @@ export class NetworkEngine {
   private ebpfClient: EbpfCollectorClient | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private onSnapshot: ((snapshot: NetworkSnapshot) => void) | null = null;
+  private onError: ((message: string) => void) | null = null;
+  private scope: MonitorNamespaceScope = ALL_NAMESPACES;
   private lastEbpfStatus: NetworkSnapshot["ebpf"] = {
     connected: false,
     collectorUrl: "",
@@ -37,8 +43,19 @@ export class NetworkEngine {
     }
   }
 
+  setScope(scope: MonitorNamespaceScope): void {
+    this.scope = scope;
+    if (this.activeClient) {
+      void this.refresh(this.activeClient);
+    }
+  }
+
   onUpdate(handler: (snapshot: NetworkSnapshot) => void): void {
     this.onSnapshot = handler;
+  }
+
+  onRefreshError(handler: (message: string) => void): void {
+    this.onError = handler;
   }
 
   start(client: K8sApiClient): void {
@@ -92,33 +109,38 @@ export class NetworkEngine {
   }
 
   private async refresh(client: K8sApiClient): Promise<void> {
-    const [pods, services, endpoints] = await Promise.all([
-      client.listPods(),
-      client.listServices(),
-      client.listEndpoints(),
-    ]);
+    try {
+      const [pods, services, endpoints] = await Promise.all([
+        client.listPods(this.scope),
+        client.listServices(this.scope),
+        client.listEndpoints(this.scope),
+      ]);
 
-    this.topology = buildTopology(pods, services, endpoints);
+      this.topology = buildTopology(pods, services, endpoints);
 
-    const ebpfStatus = this.ebpfClient
-      ? await this.ebpfClient.status()
-      : {
-          connected: false,
-          collectorUrl: "",
-          message: "Set EBPF COLLECTOR to http://127.0.0.1:9474 in Settings",
-        };
+      const ebpfStatus = this.ebpfClient
+        ? await this.ebpfClient.status(client)
+        : {
+            connected: false,
+            collectorUrl: "",
+            message: "Set EBPF COLLECTOR to http://127.0.0.1:9474 in Settings",
+          };
 
-    this.lastEbpfStatus = ebpfStatus;
+      this.lastEbpfStatus = ebpfStatus;
 
-    if (this.ebpfClient && ebpfStatus.connected) {
-      const ebpfFlows = await this.ebpfClient.fetchFlows(this.topology);
-      for (const flow of ebpfFlows) {
-        this.pushFlow(flow);
+      if (this.ebpfClient && ebpfStatus.connected) {
+        const ebpfFlows = await this.ebpfClient.fetchFlows(this.topology, client);
+        for (const flow of ebpfFlows) {
+          this.pushFlow(flow);
+        }
       }
-    }
 
-    this.topology = aggregateEdgeMetrics(this.topology, this.flows);
-    this.emitSnapshot(ebpfStatus);
+      this.topology = aggregateEdgeMetrics(this.topology, this.flows);
+      this.emitSnapshot(ebpfStatus);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Network refresh failed";
+      this.onError?.(message);
+    }
   }
 
   private pushFlow(flow: NetworkFlow): void {
@@ -127,7 +149,7 @@ export class NetworkEngine {
       this.flows[index] = flow;
     } else {
       this.flows.unshift(flow);
-      this.flows = this.flows.slice(0, MAX_FLOWS);
+      this.flows = this.flows.slice(0, retentionPolicy().maxFlows);
     }
   }
 

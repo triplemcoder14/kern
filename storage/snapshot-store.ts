@@ -1,8 +1,8 @@
 import type { NetworkSnapshot } from "../src/core/types/network";
+import { retentionPolicy } from "./retention";
 import type { ObjectStore } from "./object-store";
 import type { SnapshotQuery, StoredNetworkSnapshot } from "./types";
 
-const MAX_SNAPSHOTS = 120;
 const SNAPSHOT_PREFIX = "network-snapshots/";
 const LEGACY_SNAPSHOT_FILE = "network-snapshots.jsonl";
 
@@ -12,6 +12,14 @@ export class SnapshotStore {
   private loaded = false;
 
   constructor(private readonly store: ObjectStore) {}
+
+  private maxSnapshots(): number {
+    return retentionPolicy().maxSnapshots;
+  }
+
+  private maxSnapshotFlows(): number {
+    return retentionPolicy().maxSnapshotFlows;
+  }
 
   private snapshotKey(savedAt: string): string {
     return `${SNAPSHOT_PREFIX}${savedAt.replace(/[:.]/g, "-")}.json`;
@@ -26,13 +34,13 @@ export class SnapshotStore {
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line) as StoredNetworkSnapshot)
-      .slice(0, MAX_SNAPSHOTS);
+      .slice(0, this.maxSnapshots());
   }
 
   private async pruneDisk(keptKeys: Set<string>): Promise<void> {
     const keys = await this.store.listKeys(SNAPSHOT_PREFIX);
     const sorted = keys.sort((a, b) => b.localeCompare(a));
-    const stale = sorted.slice(MAX_SNAPSHOTS).filter((key) => !keptKeys.has(key));
+    const stale = sorted.slice(this.maxSnapshots()).filter((key) => !keptKeys.has(key));
 
     await Promise.all(stale.map((key) => this.store.deleteKey(key)));
 
@@ -53,7 +61,7 @@ export class SnapshotStore {
       return;
     }
 
-    const sorted = keys.sort((a, b) => b.localeCompare(a)).slice(0, MAX_SNAPSHOTS);
+    const sorted = keys.sort((a, b) => b.localeCompare(a)).slice(0, this.maxSnapshots());
     const rows = await Promise.all(
       sorted.map(async (key) => {
         const raw = await this.store.readText(key);
@@ -87,12 +95,12 @@ export class SnapshotStore {
         nodeCount: snapshot.topology.nodes.length,
         snapshot: {
           ...snapshot,
-          flows: snapshot.flows.slice(0, 80),
+          flows: snapshot.flows.slice(0, this.maxSnapshotFlows()),
         },
       };
 
       this.cache.unshift(record);
-      this.cache = this.cache.slice(0, MAX_SNAPSHOTS);
+      this.cache = this.cache.slice(0, this.maxSnapshots());
 
       const keptKeys = new Set(this.cache.map((row) => this.snapshotKey(row.savedAt)));
       await this.store.writeText(this.snapshotKey(record.savedAt), JSON.stringify(record));

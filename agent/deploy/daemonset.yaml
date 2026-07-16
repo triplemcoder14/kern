@@ -67,7 +67,7 @@ spec:
             - "-addr"
             - ":9474"
             - "-mode"
-            - "proc"
+            - "ebpf"
           ports:
             - name: http
               containerPort: 9474
@@ -83,6 +83,12 @@ spec:
             privileged: true
             runAsUser: 0
           volumeMounts:
+            - name: sys
+              mountPath: /sys
+            - name: kernel-debug
+              mountPath: /sys/kernel/debug
+            - name: kernel-tracing
+              mountPath: /sys/kernel/tracing
             - name: kubelet-pods
               mountPath: /var/lib/kubelet/pods
               readOnly: true
@@ -94,6 +100,15 @@ spec:
               cpu: 200m
               memory: 128Mi
       volumes:
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: kernel-debug
+          hostPath:
+            path: /sys/kernel/debug
+        - name: kernel-tracing
+          hostPath:
+            path: /sys/kernel/tracing
         - name: kubelet-pods
           hostPath:
             path: /var/lib/kubelet/pods
