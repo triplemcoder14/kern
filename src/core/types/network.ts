@@ -24,11 +24,11 @@ export interface NetworkFlow {
   bytesSent?: number;
   bytesReceived?: number;
   retransmits?: number;
-  dnsQuery?: string;
-  dnsType?: string;
-  dnsRcode?: string;
-  dnsAnswers?: string[];
-  dnsTxid?: number;
+  tcpState?: string;
+  tcpEvent?: string;
+  httpMethod?: string;
+  httpPath?: string;
+  httpStatus?: number;
 }
 
 export interface NetworkNode {
@@ -102,9 +102,9 @@ export interface EbpfFlowPayload {
   bytes_sent?: number;
   bytes_received?: number;
   retransmits?: number;
-  dns_query?: string;
-  dns_type?: string;
-  dns_rcode?: string;
-  dns_answers?: string[];
-  dns_txid?: number;
+  tcp_state?: string;
+  tcp_event?: string;
+  http_method?: string;
+  http_path?: string;
+  http_status?: number;
 }

@@ -82,6 +82,8 @@ func (t *ebpfTracer) Status() Status {
 	}
 	return Status{
 		Mode:           "ebpf",
+// 		Programs:       ebpf.ProgramCount,
+// 		FlowsPerSecond: t.collector.FlowsPerSecond(),
 		Programs:       programs,
 		FlowsPerSecond: fps,
 		Message:        msg,

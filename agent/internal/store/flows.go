@@ -30,6 +30,10 @@ type Flow struct {
 	BytesSent           *uint64   `json:"bytes_sent,omitempty"`
 	BytesReceived       *uint64   `json:"bytes_received,omitempty"`
 	Retransmits         *uint32   `json:"retransmits,omitempty"`
+  
+// 	TcpState            string    `json:"tcp_state,omitempty"`
+// 	TcpEvent            string    `json:"tcp_event,omitempty"`
+  
 	DnsQuery            string    `json:"dns_query,omitempty"`
 	DnsType             string    `json:"dns_type,omitempty"`
 	DnsRcode            string    `json:"dns_rcode,omitempty"`
@@ -84,11 +88,14 @@ func (s *FlowStore) Upsert(flow Flow) {
 	key := flowKey(flow)
 	now := time.Now().UTC()
 	flow.Timestamp = now
+	measuredLatency := flow.LatencyMs
 
 	if first, ok := s.firstSeen[key]; ok {
 		flow.FirstSeen = first
-		latency := estimateLatencyMs(key, first, now)
-		flow.LatencyMs = &latency
+		if measuredLatency == nil {
+			latency := estimateLatencyMs(key, first, now)
+			flow.LatencyMs = &latency
+		}
 	} else {
 		flow.FirstSeen = now
 		s.firstSeen[key] = now
@@ -106,6 +113,21 @@ func (s *FlowStore) Upsert(flow Flow) {
 		}
 		if flow.Retransmits == nil {
 			flow.Retransmits = existing.Retransmits
+		} else if existing.Retransmits != nil && *existing.Retransmits > *flow.Retransmits {
+			flow.Retransmits = existing.Retransmits
+		}
+		if flow.TcpState == "" {
+			flow.TcpState = existing.TcpState
+		}
+		if flow.TcpEvent == "" {
+			flow.TcpEvent = existing.TcpEvent
+		}
+		// Retransmit probes should not erase a healthy established verdict.
+		if existing.Verdict == "OK" && flow.Verdict == "RETRY" {
+			flow.Verdict = "OK"
+		}
+		if measuredLatency == nil && existing.LatencyMs != nil {
+			flow.LatencyMs = existing.LatencyMs
 		}
 		if flow.DnsQuery == "" {
 			flow.DnsQuery = existing.DnsQuery

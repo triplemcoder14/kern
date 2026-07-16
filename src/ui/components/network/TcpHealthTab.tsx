@@ -33,7 +33,7 @@ export function TcpHealthTab({ flows }: { flows: NetworkFlow[] }) {
     { label: "TCP Drops", value: String(summary.drops) },
     { label: "Retransmits", value: String(summary.retransmits) },
     { label: "Timeouts", value: String(summary.timeouts) },
-    { label: "SYN Retries*", value: String(summary.retries) },
+    { label: "Resets", value: String(summary.resets) },
     { label: "OK", value: String(summary.ok) },
     { label: "P95 Latency", value: formatMs(summary.p95LatencyMs) },
   ];
