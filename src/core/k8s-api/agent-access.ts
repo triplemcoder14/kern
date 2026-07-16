@@ -3,9 +3,14 @@ import type { K8sApiClient } from "./client";
 export const DEFAULT_AGENT_NAMESPACE = "kern";
 export const DEFAULT_AGENT_PORT = 9474;
 
-export async function listAgentPods(
-  client: K8sApiClient,
-): Promise<Array<{ namespace: string; name: string; nodeName: string }>> {
+export type AgentPodRef = {
+  namespace: string;
+  name: string;
+  nodeName: string;
+  hostIP: string;
+};
+
+export async function listAgentPods(client: K8sApiClient): Promise<AgentPodRef[]> {
   let pods = await client.listAgentPods(DEFAULT_AGENT_NAMESPACE).catch(() => []);
   if (pods.length === 0) {
     pods = await client.listAgentPods();
@@ -67,16 +72,25 @@ export async function fetchAllAgentJson<T>(
   client: K8sApiClient,
   path: string,
   options: { port?: number; timeoutMs?: number; maxPods?: number } = {},
-): Promise<Array<{ body: T; pod: { namespace: string; name: string; nodeName: string } }>> {
+): Promise<Array<{ body: T; pod: AgentPodRef }>> {
   const port = options.port ?? DEFAULT_AGENT_PORT;
   const timeoutMs = options.timeoutMs ?? 5_000;
   const maxPods = options.maxPods ?? 16;
   const pods = await listAgentPods(client);
-  const results: Array<{ body: T; pod: { namespace: string; name: string; nodeName: string } }> = [];
+  const results: Array<{ body: T; pod: AgentPodRef }> = [];
 
   await Promise.all(
     pods.slice(0, maxPods).map(async (pod) => {
       try {
+        // Prefer hostNetwork node IP (works from laptop → multipass without svc PF).
+        if (pod.hostIP) {
+          const direct = await fetchDirectAgent(`http://${pod.hostIP}:${port}`, path, timeoutMs);
+          if (direct) {
+            results.push({ body: (await direct.json()) as T, pod });
+            return;
+          }
+        }
+
         const response = await client.fetchPodProxy(
           pod.namespace,
           pod.name,

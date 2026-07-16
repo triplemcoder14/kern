@@ -30,6 +30,11 @@ type Flow struct {
 	BytesSent           *uint64   `json:"bytes_sent,omitempty"`
 	BytesReceived       *uint64   `json:"bytes_received,omitempty"`
 	Retransmits         *uint32   `json:"retransmits,omitempty"`
+	DnsQuery            string    `json:"dns_query,omitempty"`
+	DnsType             string    `json:"dns_type,omitempty"`
+	DnsRcode            string    `json:"dns_rcode,omitempty"`
+	DnsAnswers          []string  `json:"dns_answers,omitempty"`
+	DnsTxid             uint16    `json:"dns_txid,omitempty"`
 }
 
 type FlowStore struct {
@@ -54,6 +59,9 @@ func NewFlowStore() *FlowStore {
 }
 
 func flowKey(flow Flow) string {
+	if flow.DnsTxid != 0 || flow.DnsQuery != "" {
+		return fmt.Sprintf("dns:%d:%s:%s->%s", flow.DnsTxid, flow.DnsQuery, flow.SrcIP, flow.DstIP)
+	}
 	return fmt.Sprintf("%s->%s:%d/%s", flow.SrcIP, flow.DstIP, flow.Port, flow.Protocol)
 }
 
@@ -99,10 +107,68 @@ func (s *FlowStore) Upsert(flow Flow) {
 		if flow.Retransmits == nil {
 			flow.Retransmits = existing.Retransmits
 		}
+		if flow.DnsQuery == "" {
+			flow.DnsQuery = existing.DnsQuery
+		}
+		if flow.DnsType == "" {
+			flow.DnsType = existing.DnsType
+		}
+		if flow.DnsRcode == "" {
+			flow.DnsRcode = existing.DnsRcode
+		}
+		if len(flow.DnsAnswers) == 0 {
+			flow.DnsAnswers = existing.DnsAnswers
+		}
+		if flow.DnsTxid == 0 {
+			flow.DnsTxid = existing.DnsTxid
+		}
 		s.flows[idx] = flow
 		s.flowKeys[key] = now
 		s.bumpRate(now)
 		return
+	}
+
+	// Match DNS response onto an earlier query by txid + swapped endpoints.
+	if flow.DnsTxid != 0 && flow.DnsRcode != "" {
+		if idx := s.findDnsQuery(flow); idx >= 0 {
+			existing := s.flows[idx]
+			existing.LastSeen = now
+			existing.Timestamp = now
+			existing.DnsRcode = flow.DnsRcode
+			existing.DnsAnswers = flow.DnsAnswers
+			if flow.DnsType != "" {
+				existing.DnsType = flow.DnsType
+			}
+			if flow.DnsQuery != "" {
+				existing.DnsQuery = flow.DnsQuery
+			}
+			if existing.DstIP == "" && flow.DstIP != "" {
+				existing.DstIP = flow.DstIP
+			}
+			if existing.DstPod == "" && flow.DstPod != "" {
+				existing.DstPod = flow.DstPod
+				existing.DstNamespace = flow.DstNamespace
+			}
+			if existing.DstService == "" && flow.DstService != "" {
+				existing.DstService = flow.DstService
+				existing.DstServiceNamespace = flow.DstServiceNamespace
+			}
+			latency := uint32(now.Sub(existing.FirstSeen).Milliseconds())
+			if latency == 0 {
+				latency = 1
+			}
+			existing.LatencyMs = &latency
+			if flow.Verdict != "" {
+				existing.Verdict = flow.Verdict
+			}
+			if flow.Path != "" {
+				existing.Path = flow.Path
+			}
+			s.flows[idx] = existing
+			s.flowKeys[flowKey(existing)] = now
+			s.bumpRate(now)
+			return
+		}
 	}
 
 	s.flows = append([]Flow{flow}, s.flows...)
@@ -119,6 +185,29 @@ func (s *FlowStore) findIndex(key string) int {
 		if flowKey(s.flows[i]) == key {
 			return i
 		}
+	}
+	return -1
+}
+
+func (s *FlowStore) findDnsQuery(response Flow) int {
+	for i := range s.flows {
+		q := s.flows[i]
+		if q.DnsTxid != response.DnsTxid || q.DnsTxid == 0 {
+			continue
+		}
+		if q.DnsRcode != "" {
+			continue
+		}
+		// Prefer same query name when both sides decoded it.
+		if response.DnsQuery != "" && q.DnsQuery != "" && q.DnsQuery != response.DnsQuery {
+			continue
+		}
+		// Same DNS server, or server unknown on one side.
+		sameServer := q.DstIP == "" || response.DstIP == "" || q.DstIP == response.DstIP
+		if !sameServer {
+			continue
+		}
+		return i
 	}
 	return -1
 }

@@ -110,6 +110,7 @@ interface K8sPodObject {
   status?: {
     phase?: string;
     podIP?: string;
+    hostIP?: string;
     containerStatuses?: Array<{
       state?: {
         waiting?: { reason?: string };
@@ -641,7 +642,9 @@ export class K8sApiClient {
       .filter((pod) => pod.nodeName.length > 0);
   }
 
-  async listAgentPods(namespace?: string): Promise<Array<{ namespace: string; name: string; nodeName: string }>> {
+  async listAgentPods(namespace?: string): Promise<
+    Array<{ namespace: string; name: string; nodeName: string; hostIP: string }>
+  > {
     const query = new URLSearchParams({ labelSelector: "app=kern-agent" });
     const path = namespace
       ? `/api/v1/namespaces/${encodeURIComponent(namespace)}/pods?${query.toString()}`
@@ -656,6 +659,8 @@ export class K8sApiClient {
         namespace: pod.metadata.namespace ?? "default",
         name: pod.metadata.name,
         nodeName: pod.spec?.nodeName ?? "",
+        // hostNetwork agents expose the node IP as podIP
+        hostIP: pod.status?.hostIP || pod.status?.podIP || "",
       }))
       .filter((pod) => pod.name.length > 0 && pod.nodeName.length > 0);
   }
