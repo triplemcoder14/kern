@@ -119,4 +119,6 @@ export interface EbpfFlowPayload {
   http_method?: string;
   http_path?: string;
   http_status?: number;
+  grpc_method?: string;
+  grpc_status?: number;
 }

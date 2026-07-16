@@ -1,4 +1,3 @@
-// /** Port-heuristic app class — inferred only, not protocol inspection. */
 /** Port-heuristic app class — overridden when payload decode is present. */
 export type ProtocolClass =
   | "dns"
@@ -83,16 +82,13 @@ export function resolveProtocolClass(flow: {
   return inferProtocolClass(flow.port, flow.protocol);
 }
 
-// export function protocolClassLabel(value: ProtocolClass): string {
 export function protocolClassLabel(value: ProtocolClass, decoded = false): string {
   switch (value) {
     case "dns":
       return "DNS";
     case "http":
-      // return "HTTP*";
       return decoded ? "HTTP" : "HTTP*";
     case "grpc":
-      // return "gRPC*";
       return decoded ? "gRPC" : "gRPC*";
     case "postgres":
       return "Postgres*";

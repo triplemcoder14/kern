@@ -17,6 +17,7 @@ type ebpfTracer struct {
 	collector   *ebpf.Collector
 	dnsSampler  *ebpf.DnsSampler
 	httpSampler *ebpf.HttpSampler
+	grpcSampler *ebpf.GrpcSampler
 }
 
 func newEbpfTracer() (Tracer, error) {
@@ -33,10 +34,15 @@ func newEbpfTracer() (Tracer, error) {
 	if httpErr != nil {
 		log.Printf("eBPF HTTP sampler unavailable: %v", httpErr)
 	}
+	grpcSampler, grpcErr := ebpf.NewGrpcSampler()
+	if grpcErr != nil {
+		log.Printf("eBPF gRPC sampler unavailable: %v", grpcErr)
+	}
 	return &ebpfTracer{
 		collector:   collector,
 		dnsSampler:  dnsSampler,
 		httpSampler: httpSampler,
+		grpcSampler: grpcSampler,
 	}, nil
 }
 
@@ -50,9 +56,12 @@ func (t *ebpfTracer) Start(ctx context.Context, resolver *k8s.Resolver, flows *s
 	if t.httpSampler != nil {
 		defer t.httpSampler.Close()
 	}
+	if t.grpcSampler != nil {
+		defer t.grpcSampler.Close()
+	}
 
 	var wg sync.WaitGroup
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 4)
 
 	wg.Add(1)
 	go func() {
@@ -78,6 +87,16 @@ func (t *ebpfTracer) Start(ctx context.Context, resolver *k8s.Resolver, flows *s
 			defer wg.Done()
 			if err := t.httpSampler.Run(ctx, resolver, flows); err != nil && ctx.Err() == nil {
 				log.Printf("http sampler stopped: %v", err)
+			}
+		}()
+	}
+
+	if t.grpcSampler != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := t.grpcSampler.Run(ctx, resolver, flows); err != nil && ctx.Err() == nil {
+				log.Printf("grpc sampler stopped: %v", err)
 			}
 		}()
 	}
@@ -118,6 +137,13 @@ func (t *ebpfTracer) Status() Status {
 		parts = append(parts, "HTTP/1.x decode")
 	} else {
 		parts = append(parts, "HTTP offline")
+	}
+	if t.grpcSampler != nil {
+		programs += t.grpcSampler.ProgramCount()
+		fps += t.grpcSampler.FlowsPerSecond()
+		parts = append(parts, "gRPC decode")
+	} else {
+		parts = append(parts, "gRPC offline")
 	}
 	msg := parts[0]
 	for i := 1; i < len(parts); i++ {

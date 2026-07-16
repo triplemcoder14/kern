@@ -325,6 +325,10 @@ func flowToJSON(flow store.Flow) map[string]interface{} {
 	if flow.HttpStatus != nil {
 		item["http_status"] = *flow.HttpStatus
 	}
+	setOptional(item, "grpc_method", flow.GrpcMethod)
+	if flow.GrpcStatus != nil {
+		item["grpc_status"] = *flow.GrpcStatus
+	}
 	return item
 }
 

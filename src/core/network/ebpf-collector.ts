@@ -362,6 +362,8 @@ export class EbpfCollectorClient {
       httpMethod: flow.http_method,
       httpPath: flow.http_path,
       httpStatus: flow.http_status,
+      grpcMethod: flow.grpc_method,
+      grpcStatus: flow.grpc_status,
     };
   }
 }
