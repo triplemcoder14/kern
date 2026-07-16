@@ -26,6 +26,9 @@ export interface NetworkFlow {
   retransmits?: number;
   tcpState?: string;
   tcpEvent?: string;
+  httpMethod?: string;
+  httpPath?: string;
+  httpStatus?: number;
 }
 
 export interface NetworkNode {
@@ -101,4 +104,7 @@ export interface EbpfFlowPayload {
   retransmits?: number;
   tcp_state?: string;
   tcp_event?: string;
+  http_method?: string;
+  http_path?: string;
+  http_status?: number;
 }

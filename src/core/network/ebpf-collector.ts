@@ -114,6 +114,17 @@ export class EbpfCollectorClient {
           services_indexed?: number;
         };
 
+        
+        
+//           if (mode.includes("hubble")) {
+//     return `Hubble relay · ${fallback}`;
+//   }
+//   if (mode.includes("proc")) {
+//     return `ProcNet · ${fallback}`;
+//   }
+//   return `${mode} · ${fallback}`;
+// }
+        
         return {
           connected: true,
           collectorUrl: root,
@@ -310,6 +321,9 @@ export class EbpfCollectorClient {
       retransmits: flow.retransmits,
       tcpState: flow.tcp_state,
       tcpEvent: flow.tcp_event,
+      httpMethod: flow.http_method,
+      httpPath: flow.http_path,
+      httpStatus: flow.http_status,
     };
   }
 }
