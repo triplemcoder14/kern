@@ -182,12 +182,12 @@ func decodeHttpEvent(raw []byte) (store.Flow, bool) {
 		return store.Flow{}, false
 	}
 
-	srcIP := emptyIfZeroIP(ipv4String(saddr))
-	dstIP := emptyIfZeroIP(ipv4String(daddr))
+	srcIP := emptyIfZeroIPHttp(ipv4StringHttp(saddr))
+	dstIP := emptyIfZeroIPHttp(ipv4StringHttp(daddr))
 	port := dport
 	if direction == 1 {
 		if saddr != 0 {
-			dstIP = emptyIfZeroIP(ipv4String(saddr))
+			dstIP = emptyIfZeroIPHttp(ipv4StringHttp(saddr))
 		}
 		if sport != 0 {
 			port = sport
@@ -235,12 +235,12 @@ func decodeHttpEvent(raw []byte) (store.Flow, bool) {
 	return flow, true
 }
 
-func ipv4String(n uint32) string {
+func ipv4StringHttp(n uint32) string {
 	ip := net.IPv4(byte(n), byte(n>>8), byte(n>>16), byte(n>>24))
 	return ip.String()
 }
 
-func emptyIfZeroIP(ip string) string {
+func emptyIfZeroIPHttp(ip string) string {
 	if ip == "0.0.0.0" {
 		return ""
 	}

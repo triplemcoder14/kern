@@ -30,8 +30,6 @@ export function ProtocolsTab({ flows }: { flows: NetworkFlow[] }) {
 
   return (
     <div className="network-ws-overview">
-<<<<<<< Updated upstream
-=======
       {/* <p className="network-ws-banner">
         Protocol classes are port-inferred (*). Payload decode (HTTP method/route, SQL ops, Redis
         commands) is next — this view already segments live L4 paths by app class.
@@ -41,7 +39,6 @@ export function ProtocolsTab({ flows }: { flows: NetworkFlow[] }) {
         and DB wire formats stay class-only for now.
       </p>
 
->>>>>>> Stashed changes
       <div className="network-ws-proto-chips" role="tablist" aria-label="Protocol classes">
         <button
           type="button"
@@ -175,8 +172,6 @@ export function ProtocolsTab({ flows }: { flows: NetworkFlow[] }) {
                 <dt>Status</dt>
                 <dd>{selected.verdict}</dd>
               </div>
-<<<<<<< Updated upstream
-=======
               <div>
                 <dt>Method / Route</dt>
                 {/* <dd>— (decode pending)</dd> */}
@@ -191,7 +186,6 @@ export function ProtocolsTab({ flows }: { flows: NetworkFlow[] }) {
                 {/* <dd>— (decode pending)</dd> */}
                 <dd>{selected.httpStatus ?? "—"}</dd>
               </div>
->>>>>>> Stashed changes
             </dl>
           )}
         </aside>

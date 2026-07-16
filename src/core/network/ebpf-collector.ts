@@ -10,6 +10,15 @@ import type { NetworkTopology } from "../types/network";
 const DIRECT_COLLECTOR = "http://127.0.0.1:9474";
 
 function flowMergeKey(flow: EbpfFlowPayload): string {
+  if (flow.dns_txid || flow.dns_query) {
+    return [
+      "dns",
+      String(flow.dns_txid ?? 0),
+      flow.dns_query ?? "",
+      flow.src_ip,
+      flow.dst_ip,
+    ].join("|");
+  }
   return [
     flow.src_ip,
     flow.dst_ip,
@@ -293,15 +302,25 @@ export class EbpfCollectorClient {
           }
         : resolveEndpoint(flow.dst_ip, topology);
 
-    const stableId = [
-      "ebpf",
-      src.namespace ?? "",
-      src.name,
-      dst.namespace ?? "",
-      dst.name,
-      flow.protocol ?? "TCP",
-      String(flow.port),
-    ].join(":");
+    const stableId = flow.dns_txid || flow.dns_query
+      ? [
+          "dns",
+          String(flow.dns_txid ?? 0),
+          flow.dns_query ?? "",
+          src.namespace ?? "",
+          src.name,
+          dst.namespace ?? "",
+          dst.name,
+        ].join(":")
+      : [
+          "ebpf",
+          src.namespace ?? "",
+          src.name,
+          dst.namespace ?? "",
+          dst.name,
+          flow.protocol ?? "TCP",
+          String(flow.port),
+        ].join(":");
 
     return {
       id: stableId || `ebpf-${flow.timestamp}-${index}`,
@@ -321,6 +340,11 @@ export class EbpfCollectorClient {
       retransmits: flow.retransmits,
       tcpState: flow.tcp_state,
       tcpEvent: flow.tcp_event,
+      dnsQuery: flow.dns_query,
+      dnsType: flow.dns_type,
+      dnsRcode: flow.dns_rcode,
+      dnsAnswers: flow.dns_answers,
+      dnsTxid: flow.dns_txid,
       httpMethod: flow.http_method,
       httpPath: flow.http_path,
       httpStatus: flow.http_status,

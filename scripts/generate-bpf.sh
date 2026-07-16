@@ -15,17 +15,13 @@ generate_in_docker() {
       && GOPACKAGE=ebpf go run github.com/cilium/ebpf/cmd/bpf2go@v0.19.0 -cc clang -cflags "-O2 -g -Wall -Werror" -target amd64,arm64 \
            flows bpf/flows.c -- -Ibpf \
       && mv flows_* internal/ebpf/ \
-<<<<<<< Updated upstream
-      && go run github.com/cilium/ebpf/cmd/bpf2go@v0.19.0 -cc clang -cflags "-O2 -g -Wall -Werror" -target amd64,arm64 \
+      && GOPACKAGE=ebpf go run github.com/cilium/ebpf/cmd/bpf2go@v0.19.0 -cc clang -cflags "-O2 -g -Wall -Werror" -target amd64,arm64 \
            dns bpf/dns.c -- -Ibpf \
       && mv dns_* internal/ebpf/ \
-      && go run github.com/cilium/ebpf/cmd/bpf2go@v0.19.0 -cc clang -cflags "-O2 -g -Wall -Werror" -target amd64,arm64 \
-=======
       && GOPACKAGE=ebpf go run github.com/cilium/ebpf/cmd/bpf2go@v0.19.0 -cc clang -cflags "-O2 -g -Wall -Werror" -target amd64,arm64 \
            http bpf/http.c -- -Ibpf \
       && mv http_* internal/ebpf/ \
       && GOPACKAGE=profile go run github.com/cilium/ebpf/cmd/bpf2go@v0.19.0 -cc clang -cflags "-O2 -g -Wall -Werror" -target amd64,arm64 \
->>>>>>> Stashed changes
            profileStacks bpf/profile_stacks.c -- -Ibpf \
       && mv profilestacks_* internal/profile/'
 }

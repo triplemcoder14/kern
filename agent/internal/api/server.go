@@ -307,11 +307,10 @@ func flowToJSON(flow store.Flow) map[string]interface{} {
 	if flow.Retransmits != nil {
 		item["retransmits"] = *flow.Retransmits
 	}
-<<<<<<< Updated upstream
-  
-// 	setOptional(item, "tcp_state", flow.TcpState)
-// 	setOptional(item, "tcp_event", flow.TcpEvent)
-  
+	// setOptional(item, "tcp_state", flow.TcpState)
+	// setOptional(item, "tcp_event", flow.TcpEvent)
+	setOptional(item, "tcp_state", flow.TcpState)
+	setOptional(item, "tcp_event", flow.TcpEvent)
 	setOptional(item, "dns_query", flow.DnsQuery)
 	setOptional(item, "dns_type", flow.DnsType)
 	setOptional(item, "dns_rcode", flow.DnsRcode)
@@ -320,14 +319,11 @@ func flowToJSON(flow store.Flow) map[string]interface{} {
 	}
 	if flow.DnsTxid != 0 {
 		item["dns_txid"] = flow.DnsTxid
-=======
-	setOptional(item, "tcp_state", flow.TcpState)
-	setOptional(item, "tcp_event", flow.TcpEvent)
+	}
 	setOptional(item, "http_method", flow.HttpMethod)
 	setOptional(item, "http_path", flow.HttpPath)
 	if flow.HttpStatus != nil {
 		item["http_status"] = *flow.HttpStatus
->>>>>>> Stashed changes
 	}
 	return item
 }

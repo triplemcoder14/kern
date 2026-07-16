@@ -30,24 +30,19 @@ type Flow struct {
 	BytesSent           *uint64   `json:"bytes_sent,omitempty"`
 	BytesReceived       *uint64   `json:"bytes_received,omitempty"`
 	Retransmits         *uint32   `json:"retransmits,omitempty"`
-<<<<<<< Updated upstream
-  
-// 	TcpState            string    `json:"tcp_state,omitempty"`
-// 	TcpEvent            string    `json:"tcp_event,omitempty"`
-  
-	DnsQuery            string    `json:"dns_query,omitempty"`
-	DnsType             string    `json:"dns_type,omitempty"`
-	DnsRcode            string    `json:"dns_rcode,omitempty"`
-	DnsAnswers          []string  `json:"dns_answers,omitempty"`
-	DnsTxid             uint16    `json:"dns_txid,omitempty"`
-=======
-	TcpState            string    `json:"tcp_state,omitempty"`
-	TcpEvent            string    `json:"tcp_event,omitempty"`
+	// TcpState / TcpEvent come from the L4 TCP collector.
+	TcpState string `json:"tcp_state,omitempty"`
+	TcpEvent string `json:"tcp_event,omitempty"`
+	// Dns* fields are filled by the DNS UDP sampler.
+	DnsQuery   string   `json:"dns_query,omitempty"`
+	DnsType    string   `json:"dns_type,omitempty"`
+	DnsRcode   string   `json:"dns_rcode,omitempty"`
+	DnsAnswers []string `json:"dns_answers,omitempty"`
+	DnsTxid    uint16   `json:"dns_txid,omitempty"`
 	// HttpMethod / HttpPath / HttpStatus are filled by the plaintext HTTP sampler.
 	HttpMethod string  `json:"http_method,omitempty"`
 	HttpPath   string  `json:"http_path,omitempty"`
 	HttpStatus *uint16 `json:"http_status,omitempty"`
->>>>>>> Stashed changes
 }
 
 type FlowStore struct {

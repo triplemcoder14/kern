@@ -13,15 +13,10 @@ import (
 )
 
 type ebpfTracer struct {
-<<<<<<< Updated upstream
-	collector  *ebpf.Collector
-	dnsSampler *ebpf.DnsSampler
-=======
 	// collector *ebpf.Collector
 	collector   *ebpf.Collector
+	dnsSampler  *ebpf.DnsSampler
 	httpSampler *ebpf.HttpSampler
-	// dnsSampler *ebpf.DnsSampler // phase 3 (DNS) — merge when rebasing fix/dns-decode-and-multi-agent
->>>>>>> Stashed changes
 }
 
 func newEbpfTracer() (Tracer, error) {
@@ -29,37 +24,35 @@ func newEbpfTracer() (Tracer, error) {
 	if err != nil {
 		return nil, err
 	}
-<<<<<<< Updated upstream
+	// return &ebpfTracer{collector: collector}, nil
 	dnsSampler, dnsErr := ebpf.NewDnsSampler()
 	if dnsErr != nil {
 		log.Printf("eBPF DNS sampler unavailable: %v", dnsErr)
 	}
-	return &ebpfTracer{collector: collector, dnsSampler: dnsSampler}, nil
-=======
-	// return &ebpfTracer{collector: collector}, nil
 	httpSampler, httpErr := ebpf.NewHttpSampler()
 	if httpErr != nil {
 		log.Printf("eBPF HTTP sampler unavailable: %v", httpErr)
 	}
-	return &ebpfTracer{collector: collector, httpSampler: httpSampler}, nil
->>>>>>> Stashed changes
+	return &ebpfTracer{
+		collector:   collector,
+		dnsSampler:  dnsSampler,
+		httpSampler: httpSampler,
+	}, nil
 }
 
 func (t *ebpfTracer) Start(ctx context.Context, resolver *k8s.Resolver, flows *store.FlowStore) error {
 	// defer t.collector.Close()
 	// return t.collector.Run(ctx, resolver, flows)
 	defer t.collector.Close()
-<<<<<<< Updated upstream
 	if t.dnsSampler != nil {
 		defer t.dnsSampler.Close()
-=======
+	}
 	if t.httpSampler != nil {
 		defer t.httpSampler.Close()
->>>>>>> Stashed changes
 	}
 
 	var wg sync.WaitGroup
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3)
 
 	wg.Add(1)
 	go func() {
@@ -69,21 +62,22 @@ func (t *ebpfTracer) Start(ctx context.Context, resolver *k8s.Resolver, flows *s
 		}
 	}()
 
-<<<<<<< Updated upstream
 	if t.dnsSampler != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			if err := t.dnsSampler.Run(ctx, resolver, flows); err != nil && ctx.Err() == nil {
 				log.Printf("dns sampler stopped: %v", err)
-=======
+			}
+		}()
+	}
+
 	if t.httpSampler != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			if err := t.httpSampler.Run(ctx, resolver, flows); err != nil && ctx.Err() == nil {
 				log.Printf("http sampler stopped: %v", err)
->>>>>>> Stashed changes
 			}
 		}()
 	}
@@ -102,25 +96,6 @@ func (t *ebpfTracer) Status() Status {
 	if t.collector == nil {
 		return Status{Mode: "ebpf", Message: "eBPF collector not initialized"}
 	}
-<<<<<<< Updated upstream
-	programs := ebpf.ProgramCount
-	fps := t.collector.FlowsPerSecond()
-	msg := "eBPF TCP established + "
-	if t.dnsSampler != nil {
-		programs += t.dnsSampler.ProgramCount()
-		fps += t.dnsSampler.FlowsPerSecond()
-		msg += "DNS UDP payload decode"
-	} else {
-		msg += "DNS sampler offline"
-	}
-	return Status{
-		Mode:           "ebpf",
-// 		Programs:       ebpf.ProgramCount,
-// 		FlowsPerSecond: t.collector.FlowsPerSecond(),
-		Programs:       programs,
-		FlowsPerSecond: fps,
-		Message:        msg,
-=======
 	// return Status{
 	// 	Mode:           "ebpf",
 	// 	Programs:       ebpf.ProgramCount,
@@ -129,13 +104,24 @@ func (t *ebpfTracer) Status() Status {
 	// }
 	programs := ebpf.ProgramCount
 	fps := t.collector.FlowsPerSecond()
-	msg := "eBPF TCP L4"
+	parts := []string{"eBPF TCP L4"}
+	if t.dnsSampler != nil {
+		programs += t.dnsSampler.ProgramCount()
+		fps += t.dnsSampler.FlowsPerSecond()
+		parts = append(parts, "DNS decode")
+	} else {
+		parts = append(parts, "DNS offline")
+	}
 	if t.httpSampler != nil {
 		programs += t.httpSampler.ProgramCount()
 		fps += t.httpSampler.FlowsPerSecond()
-		msg += " + HTTP/1.x plaintext decode"
+		parts = append(parts, "HTTP/1.x decode")
 	} else {
-		msg += " (HTTP sampler offline)"
+		parts = append(parts, "HTTP offline")
+	}
+	msg := parts[0]
+	for i := 1; i < len(parts); i++ {
+		msg += " + " + parts[i]
 	}
 	return Status{
 		Mode: "ebpf",
@@ -145,7 +131,6 @@ func (t *ebpfTracer) Status() Status {
 		FlowsPerSecond: fps,
 		// Message:        "eBPF TCP L4 (state/RTT/bytes/retransmit)",
 		Message: msg,
->>>>>>> Stashed changes
 	}
 }
 
