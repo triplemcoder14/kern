@@ -28,32 +28,21 @@ interface ProfilingDashboardProps {
 
 type ProfilerTab = "overview" | "cpu" | "memory" | "network" | "timeline";
 
-function stackSourceBanner(source?: ProfileStackSource, hasCpuFrames?: boolean): string {
-  if (source === "ebpf" && hasCpuFrames) {
-    return "Live PSI and memory from the agent. CPU flame stacks from eBPF sampling.";
-  }
-  if (source === "proc" && hasCpuFrames) {
-    return "Live PSI and memory from the agent. CPU stacks sampled from /proc.";
-  }
-  if (source === "ebpf" && !hasCpuFrames) {
-    return "Live PSI and memory from the agent. eBPF sampler is attached — waiting for the first CPU stack frames.";
-  }
-  return "Live PSI and memory from the agent. Waiting for eBPF stack samples on this node.";
-}
-
 function cpuStackLabel(source?: ProfileStackSource): string {
-  if (source === "ebpf") {
-    return "Node performance flamegraph (eBPF)";
-  }
-  if (source === "proc") {
-    return "Node performance flamegraph (/proc)";
-  }
-  return "Node performance flamegraph";
+  // if (source === "ebpf") {
+  //   return "Node performance flamegraph (eBPF)";
+  // }
+  // if (source === "proc") {
+  //   return "Node performance flamegraph (/proc)";
+  // }
+  // return "Node performance flamegraph";
+  void source;
+  return "CPU flamegraph";
 }
 
 /** Keep root + frames belonging to pods in the selected Kubernetes namespace. */
 function isCpuRootLabel(label: string): boolean {
-  return label === "all" || label === "Node CPU";
+  return label === "all" || label === "Node CPU" || label === "CPU Samples";
 }
 
 function scopeCpuFrames<T extends { depth: number; offset: number; width: number; namespace?: string; label: string }>(
@@ -67,7 +56,9 @@ function scopeCpuFrames<T extends { depth: number; offset: number; width: number
     (frame) => frame.depth === 1 && frame.namespace === namespace,
   );
   if (pods.length === 0) {
-    return frames.filter((frame) => frame.depth === 0 || isCpuRootLabel(frame.label));
+    // return frames.filter((frame) => frame.depth === 0 || isCpuRootLabel(frame.label));
+    // Merged eBPF pyramid has no pod lanes — keep the full stack under namespace filter.
+    return frames;
   }
   return frames.filter((frame) => {
     if (frame.depth === 0 || isCpuRootLabel(frame.label)) {
@@ -93,6 +84,51 @@ function healthLabel(health: NodeHealth): string {
     return "Critical";
   }
   return "Unknown";
+}
+
+function nodeDegradeReason(detail: {
+  health: NodeHealth;
+  cpuPercent?: number;
+  memoryUsedMb?: number;
+  memoryTotalMb?: number;
+  psi?: { cpuAvg10?: number; memoryAvg10?: number };
+  psiCpuLevel?: string;
+  psiMemoryLevel?: string;
+}): { reason: string; parts: string[] } | null {
+  if (detail.health === "ok") {
+    return null;
+  }
+  const memPct =
+    detail.memoryUsedMb !== undefined && detail.memoryTotalMb
+      ? Math.round((detail.memoryUsedMb / detail.memoryTotalMb) * 100)
+      : undefined;
+  const parts: string[] = [];
+  if (detail.cpuPercent !== undefined) {
+    parts.push(`CPU ${detail.cpuPercent.toFixed(0)}%`);
+  }
+  if (memPct !== undefined) {
+    parts.push(`Memory ${memPct}%`);
+  }
+  const psiCpu = detail.psi?.cpuAvg10;
+  const psiMem = detail.psi?.memoryAvg10;
+  if (psiCpu !== undefined && psiCpu >= 0.1) {
+    parts.push(`PSI ${psiCpu.toFixed(2)}`);
+  } else if (detail.psiCpuLevel && detail.psiCpuLevel !== "normal") {
+    parts.push(`PSI ${psiBadge(detail.psiCpuLevel)}`);
+  }
+
+  let reason = "Pressure detected";
+  if ((psiMem !== undefined && psiMem >= 0.2) || detail.psiMemoryLevel === "critical" || detail.psiMemoryLevel === "warn") {
+    reason = "Memory pressure";
+  } else if ((psiCpu !== undefined && psiCpu >= 0.2) || detail.psiCpuLevel === "critical" || detail.psiCpuLevel === "warn") {
+    reason = "CPU pressure";
+  } else if (memPct !== undefined && memPct >= 85) {
+    reason = "High memory use";
+  } else if ((detail.cpuPercent ?? 0) >= 80) {
+    reason = "High CPU use";
+  }
+
+  return { reason, parts };
 }
 
 function psiBadge(level?: string): string {
@@ -452,7 +488,12 @@ export function ProfilingDashboard({
   const [selectedNode, setSelectedNode] = useState<string | undefined>();
   const [activeTab, setActiveTab] = useState<ProfilerTab>("overview");
   const [investigationTarget, setInvestigationTarget] = useState<InvestigationTarget | null>(null);
-  const { profile, loading, error } = useNodeProfile(connected, selectedNode);
+  const [flamePaused, setFlamePaused] = useState(false);
+  // const { profile, loading, error } = useNodeProfile(connected, selectedNode);
+  // Pause node profile polling while the flame is frozen for inspection.
+  const { profile, loading, error } = useNodeProfile(connected, selectedNode, {
+    paused: flamePaused,
+  });
 
   const activeNode = selectedNode ?? profile.selected?.name ?? profile.nodes[0]?.name;
   // const activeNode = profile.selected?.name ?? selectedNode ?? profile.nodes[0]?.name;
@@ -608,6 +649,26 @@ export function ProfilingDashboard({
                     <span className={`profile-badge profile-badge-${detail.health}`}>
                       {healthLabel(detail.health)}
                     </span>
+                    {(() => {
+                      const degrade = nodeDegradeReason({
+                        health: detail.health,
+                        cpuPercent: detail.cpuPercent,
+                        memoryUsedMb: detail.memoryUsedMb,
+                        memoryTotalMb: detail.memoryTotalMb,
+                        psi: detail.psi,
+                        psiCpuLevel: detail.psi.cpuLevel,
+                        psiMemoryLevel: detail.psi.memoryLevel,
+                      });
+                      if (!degrade) {
+                        return null;
+                      }
+                      return (
+                        <span className="profile-degrade-reason" title={degrade.parts.join(" · ")}>
+                          {degrade.reason}
+                          {degrade.parts.length > 0 ? ` · ${degrade.parts.join(" · ")}` : ""}
+                        </span>
+                      );
+                    })()}
                     <span className="profile-breadcrumb">
                       {detail.name}
                       {investigationTarget?.kind === "pod"
@@ -625,10 +686,6 @@ export function ProfilingDashboard({
                       {detail.agentLive ? "live agent" : detail.cpuPercent !== undefined ? "metrics-server" : "derived"}
                     </span>
                   </div>
-                </div>
-
-                <div className="profile-inferred-banner">
-                  {stackSourceBanner(detail.stackSource, scopedCpuStack.length > 0)}
                 </div>
 
                 <div className="profile-tabs" role="tablist">
@@ -656,7 +713,11 @@ export function ProfilingDashboard({
                       onSelect={setInvestigationTarget}
                       selectedLabel={selectedStackLabel}
                       sampleSeconds={detail.sampleSeconds}
+                      sampleHz={20}
                       nodeName={detail.name}
+                      paused={flamePaused}
+                      onPausedChange={setFlamePaused}
+                      processes={scopedProcesses}
                     />
                     <TimelineList events={detail.timeline.slice(0, 5)} />
                   </>
@@ -671,7 +732,11 @@ export function ProfilingDashboard({
                       onSelect={setInvestigationTarget}
                       selectedLabel={selectedStackLabel}
                       sampleSeconds={detail.sampleSeconds}
+                      sampleHz={20}
                       nodeName={detail.name}
+                      paused={flamePaused}
+                      onPausedChange={setFlamePaused}
+                      processes={scopedProcesses}
                     />
                     <HotspotList
                       hotspots={detail.kernelHotspots}
@@ -740,7 +805,10 @@ export function ProfilingDashboard({
             <InvestigationPanel
               detail={detail}
               target={investigationTarget}
-              onClear={() => setInvestigationTarget(null)}
+              onClear={() => {
+                setInvestigationTarget(null);
+                setFlamePaused(false);
+              }}
             />
           ) : null}
         </div>

@@ -21,10 +21,20 @@ import (
 	"github.com/cilium/ebpf/ringbuf"
 )
 
-const maxInlineStack = 16
+// const maxInlineStack = 16
+const maxInlineStack = 12
+
+const (
+	maxTrackedPIDs  = 48
+	maxStacksPerPID = 12
+	// pruneInterval = 30 * time.Second
+	pruneInterval = 10 * time.Second
+)
 
 type stackHit struct {
-	addrs []uint64
+	tgid  int
+	kern  []uint64
+	user  []uint64
 	count uint64
 }
 
@@ -81,7 +91,8 @@ func newEBPFStackSampler() (*ebpfStackSampler, error) {
 	go s.consume(ctx)
 	go s.pruneLoop(ctx)
 	go s.statsLoop(ctx)
-	log.Printf("eBPF CPU stack sampler attached (sched_switch ~100Hz/cpu, deferred symbolize)")
+	// log.Printf("eBPF CPU stack sampler attached (sched_switch ~100Hz/cpu, kernel+user FP unwind, deferred symbolize)")
+	log.Printf("eBPF CPU stack sampler attached (sched_switch ~20Hz/cpu, kernel+user FP unwind, deferred symbolize, memory-capped)")
 	return s, nil
 }
 
@@ -106,10 +117,10 @@ func (s *ebpfStackSampler) Close() {
 }
 
 func (s *ebpfStackSampler) consume(ctx context.Context) {
-	// event: ts_ns u64 | pid u32 | n_ips u32 | ips[16] u64
-	const header = 16
-	const ipBytes = 8 * maxInlineStack
-	minSize := header + 8 // at least one ip slot
+	// event: ts_ns u64 | pid u32 | tgid u32 | n_kern u32 | n_user u32 | kern[16] u64 | user[16] u64
+	const header = 24
+	const stackBytes = 8 * maxInlineStack
+	minSize := header + 8 // at least one IP somewhere
 
 	for {
 		record, err := s.reader.Read()
@@ -124,59 +135,101 @@ func (s *ebpfStackSampler) consume(ctx context.Context) {
 			continue
 		}
 		pid := int(binary.LittleEndian.Uint32(raw[8:12]))
-		nIPs := int(binary.LittleEndian.Uint32(raw[12:16]))
-		if pid <= 0 || nIPs <= 0 {
+		tgid := int(binary.LittleEndian.Uint32(raw[12:16]))
+		nKern := int(binary.LittleEndian.Uint32(raw[16:20]))
+		nUser := int(binary.LittleEndian.Uint32(raw[20:24]))
+		if pid <= 0 {
 			continue
 		}
-		if nIPs > maxInlineStack {
-			nIPs = maxInlineStack
+		if tgid <= 0 {
+			tgid = pid
 		}
-		need := header + nIPs*8
+		if nKern > maxInlineStack {
+			nKern = maxInlineStack
+		}
+		if nUser > maxInlineStack {
+			nUser = maxInlineStack
+		}
+		need := header + stackBytes + stackBytes
 		if len(raw) < need {
-			if len(raw) < header+ipBytes {
-				continue
-			}
-			nIPs = (len(raw) - header) / 8
+			continue
 		}
 
-		addrs := make([]uint64, 0, nIPs)
-		for i := 0; i < nIPs; i++ {
-			off := header + i*8
-			addr := binary.LittleEndian.Uint64(raw[off : off+8])
-			if addr == 0 {
-				break
-			}
-			addrs = append(addrs, addr)
-		}
-		if len(addrs) == 0 {
+		kern := readIPSlice(raw, header, nKern)
+		user := readIPSlice(raw, header+stackBytes, nUser)
+		if len(kern) == 0 && len(user) == 0 {
 			continue
 		}
 
 		// Cheap signature from raw IPs — symbolize only when building flames.
-		var sigBuilder strings.Builder
-		sigBuilder.Grow(len(addrs) * 17)
-		for i, addr := range addrs {
-			if i > 0 {
-				sigBuilder.WriteByte('|')
-			}
-			sigBuilder.WriteString(strconv.FormatUint(addr, 16))
-		}
-		sig := sigBuilder.String()
+		sig := stackSignature(kern, user)
 
 		s.mu.Lock()
 		byPID, ok := s.hits[pid]
 		if !ok {
+			// byPID = make(map[string]*stackHit)
+			// s.hits[pid] = byPID
+			if len(s.hits) >= maxTrackedPIDs {
+				s.dropColdestPIDLocked()
+			}
+			if len(s.hits) >= maxTrackedPIDs {
+				s.mu.Unlock()
+				continue
+			}
 			byPID = make(map[string]*stackHit)
 			s.hits[pid] = byPID
 		}
 		if hit, exists := byPID[sig]; exists {
 			hit.count++
+			// } else {
+			// 	byPID[sig] = &stackHit{tgid: tgid, kern: kern, user: user, count: 1}
+		} else if len(byPID) >= maxStacksPerPID {
+			// Prefer counting an existing hot stack over growing unique signatures.
+			s.bumpOldestOrDropLocked(byPID)
 		} else {
-			byPID[sig] = &stackHit{addrs: addrs, count: 1}
+			byPID[sig] = &stackHit{tgid: tgid, kern: kern, user: user, count: 1}
 		}
 		s.totalHits++
 		s.mu.Unlock()
 	}
+}
+
+func readIPSlice(raw []byte, base, n int) []uint64 {
+	if n <= 0 {
+		return nil
+	}
+	out := make([]uint64, 0, n)
+	for i := 0; i < n; i++ {
+		off := base + i*8
+		if off+8 > len(raw) {
+			break
+		}
+		addr := binary.LittleEndian.Uint64(raw[off : off+8])
+		if addr == 0 {
+			break
+		}
+		out = append(out, addr)
+	}
+	return out
+}
+
+func stackSignature(kern, user []uint64) string {
+	var b strings.Builder
+	b.Grow((len(kern) + len(user)) * 17)
+	for i, addr := range kern {
+		if i > 0 {
+			b.WriteByte('|')
+		}
+		b.WriteString(strconv.FormatUint(addr, 16))
+	}
+	b.WriteByte('#')
+	for i, addr := range user {
+		if i > 0 {
+			b.WriteByte('|')
+		}
+		b.WriteString(strconv.FormatUint(addr, 16))
+	}
+	return b.String()
 }
 
 func (s *ebpfStackSampler) statsLoop(ctx context.Context) {
@@ -198,8 +251,32 @@ func (s *ebpfStackSampler) statsLoop(ctx context.Context) {
 	}
 }
 
+func (s *ebpfStackSampler) dropColdestPIDLocked() {
+	var coldPID int
+	var coldCount uint64 = ^uint64(0)
+	for pid, bySig := range s.hits {
+		var sum uint64
+		for _, hit := range bySig {
+			sum += hit.count
+		}
+		if sum < coldCount {
+			coldCount = sum
+			coldPID = pid
+		}
+	}
+	if coldPID != 0 {
+		delete(s.hits, coldPID)
+	}
+}
+
+func (s *ebpfStackSampler) bumpOldestOrDropLocked(byPID map[string]*stackHit) {
+	// No room for a new signature — leave map unchanged (sample discarded).
+	_ = byPID
+}
+
 func (s *ebpfStackSampler) pruneLoop(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Second)
+	// ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(pruneInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -207,27 +284,38 @@ func (s *ebpfStackSampler) pruneLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			s.mu.Lock()
+			// Drop cold PIDs first.
+			for len(s.hits) > maxTrackedPIDs {
+				s.dropColdestPIDLocked()
+			}
 			for pid, bySig := range s.hits {
-				if len(bySig) > 64 {
-					type pair struct {
-						sig   string
-						count uint64
-					}
-					ordered := make([]pair, 0, len(bySig))
-					for sig, hit := range bySig {
-						ordered = append(ordered, pair{sig: sig, count: hit.count})
-					}
-					sort.Slice(ordered, func(i, j int) bool {
-						return ordered[i].count > ordered[j].count
-					})
-					keep := make(map[string]*stackHit, 48)
-					for i := 0; i < len(ordered) && i < 48; i++ {
-						keep[ordered[i].sig] = bySig[ordered[i].sig]
-					}
-					s.hits[pid] = keep
+				// if len(bySig) > 64 {
+				if len(bySig) <= maxStacksPerPID {
+					continue
 				}
+				type pair struct {
+					sig   string
+					count uint64
+				}
+				ordered := make([]pair, 0, len(bySig))
+				for sig, hit := range bySig {
+					ordered = append(ordered, pair{sig: sig, count: hit.count})
+				}
+				sort.Slice(ordered, func(i, j int) bool {
+					return ordered[i].count > ordered[j].count
+				})
+				// keep := make(map[string]*stackHit, 48)
+				// for i := 0; i < len(ordered) && i < 48; i++ {
+				keep := make(map[string]*stackHit, maxStacksPerPID)
+				for i := 0; i < len(ordered) && i < maxStacksPerPID; i++ {
+					keep[ordered[i].sig] = bySig[ordered[i].sig]
+				}
+				s.hits[pid] = keep
+				// }
 			}
 			s.mu.Unlock()
+			// Drop heavy symbol tables between flame builds.
+			userSymCache.clear()
 		}
 	}
 }
@@ -251,14 +339,23 @@ func (s *ebpfStackSampler) HotStacks(limit int) [][]string {
 		return nil
 	}
 	type scored struct {
-		addrs []uint64
+		tgid  int
+		kern  []uint64
+		user  []uint64
 		count uint64
 	}
 	s.mu.Lock()
 	var all []scored
-	for _, bySig := range s.hits {
+	for tid, bySig := range s.hits {
 		for _, hit := range bySig {
-			all = append(all, scored{addrs: hit.addrs, count: hit.count})
+			tgid := hit.tgid
+			if tgid <= 0 {
+				tgid = readTgid(tid)
+			}
+			if tgid <= 0 {
+				tgid = tid
+			}
+			all = append(all, scored{tgid: tgid, kern: hit.kern, user: hit.user, count: hit.count})
 		}
 	}
 	s.mu.Unlock()
@@ -268,33 +365,49 @@ func (s *ebpfStackSampler) HotStacks(limit int) [][]string {
 	}
 	out := make([][]string, 0, len(all))
 	for _, item := range all {
-		out = append(out, resolveStackAddrs(item.addrs))
+		resolved := resolveMixedStack(item.tgid, item.kern, item.user)
+		labels := make([]string, 0, len(resolved))
+		for _, frame := range resolved {
+			labels = append(labels, frame.Label)
+		}
+		out = append(out, labels)
 	}
 	return out
 }
 
 func (s *ebpfStackSampler) FlameFrames(pid int) []StackFrame {
-	if !s.Available() || pid <= 0 {
+	if !s.Available() {
 		return nil
 	}
+	// Symbol tables are built on demand for this request; drop them after so RSS stays flat.
+	defer userSymCache.clear()
+
+	// pid <= 0 → node-wide merge (classic pyramid). pid > 0 → that process only.
+	nodeWide := pid <= 0
 
 	s.mu.Lock()
 	bySig := map[string]*stackHit{}
 	tgidCache := map[int]int{}
 	for tid, hits := range s.hits {
-		if tid == pid || sameProcessCached(pid, tid, tgidCache) {
-			for sig, hit := range hits {
-				if existing, ok := bySig[sig]; ok {
-					existing.count += hit.count
-				} else {
-					cp := *hit
-					bySig[sig] = &cp
-				}
+		if !nodeWide && tid != pid && !sameProcessCached(pid, tid, tgidCache) {
+			continue
+		}
+		for sig, hit := range hits {
+			if existing, ok := bySig[sig]; ok {
+				existing.count += hit.count
+			} else {
+				cp := *hit
+				bySig[sig] = &cp
 			}
 		}
 	}
 	// If no thread match yet, use hottest node-wide stacks so UI can still report ebpf.
-	if len(bySig) == 0 {
+	// if len(bySig) == 0 {
+	// 	for _, hits := range s.hits {
+	// 		...
+	// 	}
+	// }
+	if !nodeWide && len(bySig) == 0 {
 		for _, hits := range s.hits {
 			for sig, hit := range hits {
 				if existing, ok := bySig[sig]; ok {
@@ -308,13 +421,15 @@ func (s *ebpfStackSampler) FlameFrames(pid int) []StackFrame {
 	}
 
 	type scored struct {
-		addrs []uint64
+		tgid  int
+		kern  []uint64
+		user  []uint64
 		count uint64
 	}
 	scoredHits := make([]scored, 0, len(bySig))
 	var total uint64
 	for _, hit := range bySig {
-		scoredHits = append(scoredHits, scored{addrs: hit.addrs, count: hit.count})
+		scoredHits = append(scoredHits, scored{tgid: hit.tgid, kern: hit.kern, user: hit.user, count: hit.count})
 		total += hit.count
 	}
 	s.mu.Unlock()
@@ -326,17 +441,30 @@ func (s *ebpfStackSampler) FlameFrames(pid int) []StackFrame {
 	sort.Slice(scoredHits, func(i, j int) bool {
 		return scoredHits[i].count > scoredHits[j].count
 	})
-	if len(scoredHits) > 12 {
-		scoredHits = scoredHits[:12]
+	// Keep enough unique stacks for a dense merged pyramid (was 12).
+	// if len(scoredHits) > 12 {
+	// 	scoredHits = scoredHits[:12]
+	// }
+	maxStacks := 12
+	if nodeWide {
+		maxStacks = 48
+	}
+	if len(scoredHits) > maxStacks {
+		scoredHits = scoredHits[:maxStacks]
 	}
 
 	type resolved struct {
-		frames []string
+		frames []resolvedFrame
 		count  uint64
 	}
 	resolvedHits := make([]resolved, 0, len(scoredHits))
 	for _, hit := range scoredHits {
-		frames := resolveStackAddrs(hit.addrs)
+		// resolvePid := pid
+		resolvePid := hit.tgid
+		if resolvePid <= 0 {
+			resolvePid = pid
+		}
+		frames := resolveMixedStack(resolvePid, hit.kern, hit.user)
 		if len(frames) == 0 {
 			continue
 		}
@@ -348,47 +476,81 @@ func (s *ebpfStackSampler) FlameFrames(pid int) []StackFrame {
 
 	type node struct {
 		label    string
+		kind     string
+		binary   string
+		offset   string
 		count    uint64
 		children map[string]*node
 	}
-	// root := &node{label: "all", children: map[string]*node{}}
-	root := &node{label: "Node CPU", children: map[string]*node{}}
+				// root := &node{label: "all", children: map[string]*node{}}
+	// root := &node{label: "Node CPU", kind: "cpu", children: map[string]*node{}}
+	// root := &node{label: "CPU Samples", kind: "root", children: map[string]*node{}}
+	root := &node{label: "Node CPU", kind: "root", children: map[string]*node{}}
 	for _, hit := range resolvedHits {
 		cur := root
 		cur.count += hit.count
 		for i := len(hit.frames) - 1; i >= 0; i-- {
-			label := hit.frames[i]
-			child, ok := cur.children[label]
+			frame := hit.frames[i]
+			child, ok := cur.children[frame.Label]
 			if !ok {
-				child = &node{label: label, children: map[string]*node{}}
-				cur.children[label] = child
+				child = &node{
+					label:    frame.Label,
+					kind:     frame.Kind,
+					binary:   frame.Binary,
+					offset:   frame.Offset,
+					children: map[string]*node{},
+				}
+				cur.children[frame.Label] = child
 			}
 			child.count += hit.count
+			if child.kind == "" {
+				child.kind = frame.Kind
+			}
+			if child.binary == "" {
+				child.binary = frame.Binary
+			}
+			if child.offset == "" {
+				child.offset = frame.Offset
+			}
 			cur = child
 		}
 	}
 
 	frames := make([]StackFrame, 0, 64)
-	var walk func(n *node, depth int, offset float64, parentWidth float64)
-	walk = func(n *node, depth int, offset float64, parentWidth float64) {
-		width := parentWidth
-		if root.count > 0 && depth > 0 {
-			width = parentWidth * (float64(n.count) / float64(root.count))
-		}
+	// Width must be the frame's own share of the root (parent * child/parent), not
+	// parentWidth * child/root — the latter shrinks every level and leaves gaps.
+	// var walk func(n *node, depth int, offset float64, parentWidth float64)
+	// walk = func(n *node, depth int, offset float64, parentWidth float64) {
+	// 	width := parentWidth
+	// 	if root.count > 0 && depth > 0 {
+	// 		width = parentWidth * (float64(n.count) / float64(root.count))
+	// 	}
+	// 	if depth == 0 {
+	// 		width = 1
+	// 	}
+	var walk func(n *node, depth int, offset float64, frameWidth float64)
+	walk = func(n *node, depth int, offset float64, frameWidth float64) {
+		width := frameWidth
 		if depth == 0 {
 			width = 1
 		}
 		share := 100 * float64(n.count) / float64(root.count)
+		kind := n.kind
+		if kind == "" {
+			kind = "cpu"
+		}
 		frames = append(frames, StackFrame{
 			ID:       fmt.Sprintf("cpu-%d-%s", depth, n.label),
 			Label:    n.label,
+			Subtitle: n.offset,
+			Binary:   n.binary,
 			Depth:    depth,
 			Width:    width,
 			Offset:   offset,
 			Heat:     min(1, 0.15+float64(n.count)/float64(root.count)),
 			SharePct: int(share + 0.5),
 			Samples:  int(n.count),
-			Kind:     "cpu",
+			Kind:     kind,
 		})
 		childList := make([]*node, 0, len(n.children))
 		for _, child := range n.children {
@@ -400,7 +562,8 @@ func (s *ebpfStackSampler) FlameFrames(pid int) []StackFrame {
 		childOffset := offset
 		for _, child := range childList {
 			childWidth := width * (float64(child.count) / float64(n.count))
-			walk(child, depth+1, childOffset, width)
+			// walk(child, depth+1, childOffset, width)
+			walk(child, depth+1, childOffset, childWidth)
 			childOffset += childWidth
 		}
 	}

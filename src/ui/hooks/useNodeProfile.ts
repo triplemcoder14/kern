@@ -7,11 +7,16 @@ const EMPTY_PROFILE: ProfileSnapshot = {
   updatedAt: "",
 };
 
-export function useNodeProfile(connected: boolean, selectedNode?: string) {
+export function useNodeProfile(
+  connected: boolean,
+  selectedNode?: string,
+  options?: { paused?: boolean },
+) {
   const [profile, setProfile] = useState<ProfileSnapshot>(EMPTY_PROFILE);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const hasNodesRef = useRef(false);
+  const paused = Boolean(options?.paused);
 
   useEffect(() => {
     hasNodesRef.current = profile.nodes.length > 0;
@@ -41,14 +46,20 @@ export function useNodeProfile(connected: boolean, selectedNode?: string) {
 
   useEffect(() => {
     void refresh();
-    if (!connected) {
+    // if (!connected) {
+    //   return undefined;
+    // }
+    // const timer = setInterval(() => {
+    //   void refresh();
+    // }, 3000);
+    if (!connected || paused) {
       return undefined;
     }
     const timer = setInterval(() => {
       void refresh();
     }, 3000);
     return () => clearInterval(timer);
-  }, [connected, refresh]);
+  }, [connected, refresh, paused]);
 
   return { profile, loading, error, refresh };
 }

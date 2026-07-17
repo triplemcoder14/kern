@@ -95,10 +95,16 @@ spec:
           resources:
             requests:
               cpu: 50m
+              # memory: 64Mi
+              # memory: 96Mi
               memory: 64Mi
             limits:
               cpu: 200m
-              memory: 128Mi
+              # memory: 128Mi
+              # User+kernel symbolize (ELF / Go pclntab) needs headroom beyond 128Mi.
+              # memory: 384Mi
+              # Lean profile after sample-rate + symbol-cache caps (raise only if OOM returns).
+              memory: 192Mi
       volumes:
         - name: sys
           hostPath:
