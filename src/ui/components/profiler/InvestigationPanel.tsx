@@ -24,7 +24,17 @@ export type InvestigationTarget =
   | { kind: "kernel"; function: string; share?: number; meaning?: string }
   | { kind: "pod"; namespace: string; pod: string; cpuPercent?: number; rssMb?: number }
   | { kind: "process"; pid: number; name: string; pod?: string; namespace?: string }
-  | { kind: "stack"; label: string; heat?: number };
+  | {
+      kind: "stack";
+      label: string;
+      heat?: number;
+      depth?: number;
+      namespace?: string;
+      path?: string;
+      subtitle?: string;
+      sharePct?: number;
+      samples?: number;
+    };
 
 interface InvestigationPanelProps {
   detail: NodeProfileDetail;

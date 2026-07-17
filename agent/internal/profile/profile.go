@@ -116,6 +116,7 @@ type KernelHotspot struct {
 	Function string  `json:"function"`
 	Share    float64 `json:"share"`
 	Meaning  string  `json:"meaning,omitempty"`
+	Category string  `json:"category,omitempty"`
 }
 
 type TimelineEvent struct {

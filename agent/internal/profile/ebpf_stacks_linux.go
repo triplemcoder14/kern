@@ -351,7 +351,8 @@ func (s *ebpfStackSampler) FlameFrames(pid int) []StackFrame {
 		count    uint64
 		children map[string]*node
 	}
-	root := &node{label: "all", children: map[string]*node{}}
+	// root := &node{label: "all", children: map[string]*node{}}
+	root := &node{label: "Node CPU", children: map[string]*node{}}
 	for _, hit := range resolvedHits {
 		cur := root
 		cur.count += hit.count

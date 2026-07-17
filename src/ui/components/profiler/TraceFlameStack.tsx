@@ -31,13 +31,36 @@ function frameDisplayLabel(frame: ProfileStackFrame, maxChars: number): string {
   return `${frame.label.slice(0, Math.max(4, maxChars - 1))}…`;
 }
 
-/** Prefer share-of-parent when present so color tracks pressure, not arbitrary heat. */
+/** Prefer share-of-node when present so color matches the legend thresholds. */
 function framePressureHeat(frame: ProfileStackFrame): number {
   if (frame.sharePct !== undefined) {
     // Soft curve: small frames stay green, mid pressure amber, hot frames red.
-    return Math.min(1, (frame.sharePct / 100) ** 0.82);
+    // return Math.min(1, (frame.sharePct / 100) ** 0.82);
+    if (frame.sharePct >= 20) {
+      return Math.min(1, 0.82 + (frame.sharePct - 20) / 400);
+    }
+    if (frame.sharePct >= 10) {
+      return 0.5 + ((frame.sharePct - 10) / 10) * 0.22;
+    }
+    return 0.12 + (frame.sharePct / 10) * 0.32;
   }
   return Math.max(0, Math.min(1, frame.heat));
+}
+
+function isRootCpuFrame(frame: ProfileStackFrame): boolean {
+  return frame.depth === 0 || frame.label === "all" || frame.label === "Node CPU";
+}
+
+function isNumericSubtitle(value?: string): boolean {
+  return Boolean(value && /^\d+$/.test(value.trim()));
+}
+
+function podNameFromPath(path?: string): string | undefined {
+  if (!path) {
+    return undefined;
+  }
+  const parts = path.split("/");
+  return parts[parts.length - 1] || undefined;
 }
 
 function DetailRow({ label, value, hint }: { label: string; value: string; hint?: string }) {
@@ -49,7 +72,6 @@ function DetailRow({ label, value, hint }: { label: string; value: string; hint?
   );
 }
 
-
 export type TraceFlameVariant = "network" | "cpu" | "memory";
 
 interface TraceFlameStackProps {
@@ -58,6 +80,12 @@ interface TraceFlameStackProps {
   variant?: TraceFlameVariant;
   onSelect?: (target: InvestigationTarget) => void;
   selectedLabel?: string;
+  /** Sample window length in seconds (shown in CPU meta strip). */
+  sampleSeconds?: number;
+  /** Nominal sampling frequency in Hz when known. */
+  sampleHz?: number;
+  /** Node name for selected-frame detail. */
+  nodeName?: string;
 }
 
 export function TraceFlameStack({
@@ -66,6 +94,9 @@ export function TraceFlameStack({
   variant = "network",
   onSelect,
   selectedLabel,
+  sampleSeconds,
+  sampleHz = 99,
+  nodeName,
 }: TraceFlameStackProps) {
   const title =
     label ??
@@ -76,10 +107,20 @@ export function TraceFlameStack({
         : "Network flame graph");
   const hint =
     variant === "cpu"
-      ? "all → pod → process → stack. Click a frame for samples and share of node CPU."
+      // ? "all → pod → process → stack. Click a frame for samples and share of node CPU."
+      ? "Node CPU → pod → process → kernel stack. Width = CPU share. Color = share of node CPU."
       : variant === "memory"
-        ? "all → pod → process. Width = retained RSS bytes (not CPU samples). Click a frame for ownership."
+        // ? "all → pod → process. Width = retained RSS bytes (not CPU samples). Click a frame for ownership."
+        ? "Node → pod → process. Width = retained RSS bytes (not CPU samples). Click a frame for ownership."
         : "Click a frame to inspect protocol, peer, bytes, and latency contribution.";
+
+  const rootFrame = frames.find((frame) => isRootCpuFrame(frame)) ?? frames[0] ?? null;
+  const totalSamples = rootFrame?.samples;
+  const windowSeconds = sampleSeconds ?? 30;
+  const cpuTimeSeconds =
+    totalSamples !== undefined && sampleHz > 0
+      ? (totalSamples / sampleHz).toFixed(1)
+      : undefined;
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [focusId, setFocusId] = useState<string | null>(null);
@@ -140,6 +181,15 @@ export function TraceFlameStack({
   const height = depthRows * rowHeight + 10;
   const shareTone = flameShareTone(selected?.sharePct);
 
+  const selectedPod =
+    selected?.depth === 1
+      ? selected.label
+      : podNameFromPath(selected?.path) ?? selected?.subtitle;
+  const selectedThread =
+    selected && selected.depth === 2 && isNumericSubtitle(selected.subtitle)
+      ? selected.subtitle
+      : undefined;
+
   return (
     <div className="network-flame network-flame-sleek">
       <div className="profile-flamegraph-wrap network-flame-graph">
@@ -147,12 +197,18 @@ export function TraceFlameStack({
           <span className="profile-panel-label">{title}</span>
           <div className="network-flame-toolbar">
             <div className="network-flame-legend" aria-hidden>
-              <span className="network-flame-legend-swatch network-flame-legend-good" />
+              {/* <span className="network-flame-legend-swatch network-flame-legend-good" />
               good
               <span className="network-flame-legend-swatch network-flame-legend-warn" />
               pressure
               <span className="network-flame-legend-swatch network-flame-legend-hot" />
-              hot
+              hot */}
+              <span className="network-flame-legend-swatch network-flame-legend-good" />
+              {"<10%"}
+              <span className="network-flame-legend-swatch network-flame-legend-warn" />
+              10–20%
+              <span className="network-flame-legend-swatch network-flame-legend-hot" />
+              {">20%"}
             </div>
             {focusId ? (
               <button
@@ -166,6 +222,34 @@ export function TraceFlameStack({
           </div>
         </div>
         <p className="network-flame-hint">{hint}</p>
+
+        {variant === "cpu" ? (
+          <div className="network-flame-meta" aria-label="Sample window summary">
+            <div className="network-flame-meta-item">
+              <span className="network-flame-meta-label">Samples</span>
+              <span className="network-flame-meta-value">
+                {totalSamples !== undefined ? totalSamples.toLocaleString() : "—"}
+              </span>
+            </div>
+            <div className="network-flame-meta-item">
+              <span className="network-flame-meta-label">Window</span>
+              <span className="network-flame-meta-value">{windowSeconds}s</span>
+            </div>
+            <div className="network-flame-meta-item">
+              <span className="network-flame-meta-label">Frequency</span>
+              <span className="network-flame-meta-value">{sampleHz} Hz</span>
+            </div>
+            <div className="network-flame-meta-item">
+              {/* <span className="network-flame-meta-label">CPU time</span> */}
+              <span className="network-flame-meta-label">Observed CPU</span>
+              <span className="network-flame-meta-value">
+                {/* {cpuTimeSeconds !== undefined ? `${cpuTimeSeconds}s` : "—"} */}
+                {cpuTimeSeconds !== undefined ? `${cpuTimeSeconds} CPU-sec` : "—"}
+              </span>
+            </div>
+          </div>
+        ) : null}
+
         <div
           className="network-flame-scale"
           style={{ background: FLAME_GRADIENT_CSS }}
@@ -220,6 +304,16 @@ export function TraceFlameStack({
               selectedLabel === frame.label;
             const chars = Math.max(4, Math.floor(blockWidth / 7));
             const heat = framePressureHeat(frame);
+            const showPidLine =
+              variant === "cpu" &&
+              frame.depth === 2 &&
+              isNumericSubtitle(frame.subtitle) &&
+              blockWidth >= 56;
+            const showRootShare =
+              variant === "cpu" &&
+              isRootCpuFrame(frame) &&
+              frame.sharePct !== undefined &&
+              blockWidth >= 72;
             return (
               <g
                 key={`${id}-${index}`}
@@ -227,7 +321,17 @@ export function TraceFlameStack({
                 style={{ cursor: "pointer" }}
                 onClick={() => {
                   setSelectedId(id);
-                  onSelect?.({ kind: "stack", label: frame.label, heat });
+                  onSelect?.({
+                    kind: "stack",
+                    label: frame.label,
+                    heat,
+                    depth: frame.depth,
+                    namespace: frame.namespace,
+                    path: frame.path,
+                    subtitle: frame.subtitle,
+                    sharePct: frame.sharePct,
+                    samples: frame.samples,
+                  });
                 }}
                 onDoubleClick={() => setFocusId(frame.id ?? id)}
               >
@@ -256,14 +360,36 @@ export function TraceFlameStack({
                   stroke={isSelected ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.18)"}
                   strokeWidth={isSelected ? 1.6 : 0.5}
                 />
-                <text
-                  x={x + 8}
-                  y={y + 15}
-                  className="profile-flame-label"
-                  fill={flameLabelColor(heat)}
-                >
-                  {frameDisplayLabel(frame, chars)}
-                </text>
+                {showPidLine || showRootShare ? (
+                  <>
+                    <text
+                      x={x + 8}
+                      y={y + 11}
+                      className="profile-flame-label profile-flame-label-primary"
+                      fill={flameLabelColor(heat)}
+                    >
+                      {frameDisplayLabel(frame, chars)}
+                    </text>
+                    <text
+                      x={x + 8}
+                      y={y + 21}
+                      className="profile-flame-label profile-flame-label-secondary"
+                      fill={flameLabelColor(heat)}
+                      opacity={0.85}
+                    >
+                      {showPidLine ? frame.subtitle : `${frame.sharePct}%`}
+                    </text>
+                  </>
+                ) : (
+                  <text
+                    x={x + 8}
+                    y={y + 15}
+                    className="profile-flame-label"
+                    fill={flameLabelColor(heat)}
+                  >
+                    {frameDisplayLabel(frame, chars)}
+                  </text>
+                )}
               </g>
             );
           })}
@@ -276,8 +402,11 @@ export function TraceFlameStack({
             <div>
               <span className="profile-panel-label">Selected frame</span>
               <h3 className="network-flame-detail-title">{selected.label}</h3>
-              {selected.subtitle ? (
+              {selected.subtitle && !isNumericSubtitle(selected.subtitle) ? (
                 <p className="network-flame-detail-sub">{selected.subtitle}</p>
+              ) : null}
+              {selectedThread ? (
+                <p className="network-flame-detail-sub">PID {selectedThread}</p>
               ) : null}
             </div>
             {selected.sharePct !== undefined ? (
@@ -290,7 +419,7 @@ export function TraceFlameStack({
           <div className="network-flame-detail-grid">
             {variant === "cpu" ? (
               <>
-                <DetailRow
+                {/* <DetailRow
                   label="Samples"
                   value={selected.samples !== undefined ? String(selected.samples) : "—"}
                 />
@@ -307,7 +436,38 @@ export function TraceFlameStack({
                   label="Pod namespace"
                   value={selected.namespace?.trim() ? selected.namespace : "—"}
                   hint="Kubernetes namespace of this pod/process frame. Protocol/root frames have none."
+                /> */}
+                <DetailRow
+                  label="CPU"
+                  value={selected.sharePct !== undefined ? `${selected.sharePct}%` : "—"}
+                  hint="Share of sampled node CPU in this window."
                 />
+                <DetailRow
+                  label="Samples"
+                  value={selected.samples !== undefined ? selected.samples.toLocaleString() : "—"}
+                />
+                <DetailRow
+                  label="Pod"
+                  value={selectedPod?.trim() ? selectedPod : "—"}
+                />
+                <DetailRow
+                  label="Thread"
+                  value={selectedThread ?? "—"}
+                  hint="Linux PID for this process frame."
+                />
+                <DetailRow
+                  label="Namespace"
+                  value={selected.namespace?.trim() ? selected.namespace : "—"}
+                />
+                <DetailRow label="Node" value={nodeName?.trim() ? nodeName : "—"} />
+                <DetailRow
+                  label="Sampling window"
+                  value={sampleSeconds !== undefined ? `${sampleSeconds}s` : `${windowSeconds}s`}
+                />
+                {/* <DetailRow
+                  label="Flame depth"
+                  value={String(selected.depth)}
+                /> */}
               </>
             ) : variant === "memory" ? (
               <>

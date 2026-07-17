@@ -11,8 +11,9 @@ import (
 const maxNodeFlameProcesses = 10
 const maxStackDepthShown = 12
 
-// buildCPUStack builds a node-wide performance flame:
-// all → pod → process → kernel/user frames (siblings sized by CPU share).
+	// buildCPUStack builds a node-wide performance flame:
+	// all - pod - process  kernel/user frames (siblings sized by CPU share).
+	// Node CPU  pod  process  kernel/user frames (siblings sized by CPU share).
 func buildCPUStack(processes []ProcessSample, network NetworkProfile, sampler StackSampler) ([]StackFrame, string) {
 	if len(processes) == 0 {
 		return network.Stack, "inferred"
@@ -37,16 +38,18 @@ func buildNodePerformanceFlame(processes []ProcessSample, sampler StackSampler) 
 	}
 
 	frames := []StackFrame{{
-		ID:       "node-all",
-		Label:    "all",
-		Depth:    0,
-		Width:    1,
-		Offset:   0,
-		Heat:     0.1,
+		ID: "node-all",
+		// Label:    "all",
+		Label: "Node CPU",
+		Depth:  0,
+		Width:  1,
+		Offset: 0,
+		Heat:   0.1,
 		SharePct: 100,
 		Samples:  estimateSamples(totalCPU),
 		Kind:     "cpu",
-		Subtitle: "node",
+		// Subtitle: "node",
+		Subtitle: "100%",
 	}}
 
 	type podBucket struct {
@@ -83,8 +86,9 @@ func buildNodePerformanceFlame(processes []ProcessSample, sampler StackSampler) 
 		podShare := int(podWidth*100 + 0.5)
 		podID := "pod-" + key
 		frames = append(frames, StackFrame{
-			ID:        podID,
-			Label:     "pod: " + bucket.label,
+			ID: podID,
+			// Label:     "pod: " + bucket.label,
+			Label:     bucket.label,
 			Subtitle:  bucket.namespace,
 			Namespace: bucket.namespace,
 			Depth:     1,
@@ -94,18 +98,21 @@ func buildNodePerformanceFlame(processes []ProcessSample, sampler StackSampler) 
 			SharePct:  max(1, podShare),
 			Samples:   estimateSamples(bucket.cpu),
 			Kind:      "cpu",
+			Path:      bucket.namespace + "/" + bucket.label,
 		})
 
 		procOffset := podOffset
 		for _, proc := range bucket.procs {
 			procWeight := max(proc.CPUPercent, 0.01) / totalCPU
 			procShare := int(procWeight*100 + 0.5)
-			procLabel := fmt.Sprintf("pid: %s (%d)", proc.Name, proc.PID)
+			// procLabel := fmt.Sprintf("pid: %s (%d)", proc.Name, proc.PID)
 			procID := fmt.Sprintf("proc-%d", proc.PID)
 			frames = append(frames, StackFrame{
-				ID:        procID,
-				Label:     procLabel,
-				Subtitle:  bucket.label,
+				ID: procID,
+				// Label:     procLabel,
+				// Subtitle:  bucket.label,
+				Label:     proc.Name,
+				Subtitle:  strconv.Itoa(proc.PID),
 				Namespace: bucket.namespace,
 				Depth:     2,
 				Width:     procWeight,
@@ -114,6 +121,7 @@ func buildNodePerformanceFlame(processes []ProcessSample, sampler StackSampler) 
 				SharePct:  max(1, procShare),
 				Samples:   estimateSamples(proc.CPUPercent),
 				Kind:      "cpu",
+				Path:      bucket.namespace + "/" + bucket.label,
 			})
 
 			stackFrames, stackSource := processStackFrames(proc, sampler, procOffset, procWeight)
@@ -144,7 +152,7 @@ func processStackFrames(proc ProcessSample, sampler StackSampler, offset, width 
 		if flame := sampler.FlameFrames(proc.PID); len(flame) > 0 {
 			out := make([]StackFrame, 0, len(flame))
 			for _, frame := range flame {
-				if frame.Label == "all" || frame.Depth == 0 {
+				if frame.Label == "all" || frame.Label == "Node CPU" || frame.Depth == 0 {
 					continue
 				}
 				shifted := frame
@@ -263,12 +271,15 @@ func buildCPUStackFromKernel(top ProcessSample, kernelFrames []string) []StackFr
 	extra, _ := processStackFrames(top, nil, 0.02, 0.85)
 	_ = extra
 	out := []StackFrame{
-		{ID: "node-all", Label: "all", Depth: 0, Width: 1, Offset: 0, Heat: 0.1, SharePct: 100, Samples: estimateSamples(top.CPUPercent), Kind: "cpu"},
+		// {ID: "node-all", Label: "all", Depth: 0, Width: 1, Offset: 0, Heat: 0.1, SharePct: 100, Samples: estimateSamples(top.CPUPercent), Kind: "cpu"},
+		{ID: "node-all", Label: "Node CPU", Depth: 0, Width: 1, Offset: 0, Heat: 0.1, SharePct: 100, Samples: estimateSamples(top.CPUPercent), Kind: "cpu", Subtitle: "100%"},
 	}
 	key, label, ns := podKey(top)
 	out = append(out,
-		StackFrame{ID: "pod-" + key, Label: "pod: " + label, Namespace: ns, Depth: 1, Width: 0.92, Offset: 0.04, Heat: 0.28, SharePct: 92, Samples: estimateSamples(top.CPUPercent), Kind: "cpu"},
-		StackFrame{ID: fmt.Sprintf("proc-%d", top.PID), Label: fmt.Sprintf("pid: %s (%d)", top.Name, top.PID), Depth: 2, Width: 0.85, Offset: 0.06, Heat: 0.45, SharePct: 85, Samples: estimateSamples(top.CPUPercent), Kind: "cpu"},
+		// StackFrame{ID: "pod-" + key, Label: "pod: " + label, Namespace: ns, Depth: 1, Width: 0.92, Offset: 0.04, Heat: 0.28, SharePct: 92, Samples: estimateSamples(top.CPUPercent), Kind: "cpu"},
+		// StackFrame{ID: fmt.Sprintf("proc-%d", top.PID), Label: fmt.Sprintf("pid: %s (%d)", top.Name, top.PID), Depth: 2, Width: 0.85, Offset: 0.06, Heat: 0.45, SharePct: 85, Samples: estimateSamples(top.CPUPercent), Kind: "cpu"},
+		StackFrame{ID: "pod-" + key, Label: label, Namespace: ns, Subtitle: ns, Depth: 1, Width: 0.92, Offset: 0.04, Heat: 0.28, SharePct: 92, Samples: estimateSamples(top.CPUPercent), Kind: "cpu"},
+		StackFrame{ID: fmt.Sprintf("proc-%d", top.PID), Label: top.Name, Subtitle: strconv.Itoa(top.PID), Depth: 2, Width: 0.85, Offset: 0.06, Heat: 0.45, SharePct: 85, Samples: estimateSamples(top.CPUPercent), Kind: "cpu"},
 	)
 	n := len(kernelFrames)
 	for index, name := range kernelFrames {
@@ -298,12 +309,15 @@ func buildInferredCPUStack(processes []ProcessSample, network NetworkProfile) []
 	kernelPath := inferKernelPath(top.Name, network)
 	parts := strings.Split(kernelPath, " → ")
 	out := []StackFrame{
-		{Label: "all", Depth: 0, Width: 1, Offset: 0, Heat: 0.12, SharePct: 100, Kind: "cpu"},
+		// {Label: "all", Depth: 0, Width: 1, Offset: 0, Heat: 0.12, SharePct: 100, Kind: "cpu"},
+		{Label: "Node CPU", Depth: 0, Width: 1, Offset: 0, Heat: 0.12, SharePct: 100, Kind: "cpu", Subtitle: "100%"},
 	}
 	_, label, ns := podKey(top)
 	out = append(out,
-		StackFrame{Label: "pod: " + label, Namespace: ns, Depth: 1, Width: 0.85, Offset: 0.02, Heat: 0.35, SharePct: 85, Kind: "cpu"},
-		StackFrame{Label: fmt.Sprintf("pid: %s (%d)", top.Name, top.PID), Depth: 2, Width: 0.7, Offset: 0.08, Heat: 0.55, SharePct: 70, Kind: "cpu"},
+		// StackFrame{Label: "pod: " + label, Namespace: ns, Depth: 1, Width: 0.85, Offset: 0.02, Heat: 0.35, SharePct: 85, Kind: "cpu"},
+		// StackFrame{Label: fmt.Sprintf("pid: %s (%d)", top.Name, top.PID), Depth: 2, Width: 0.7, Offset: 0.08, Heat: 0.55, SharePct: 70, Kind: "cpu"},
+		StackFrame{Label: label, Namespace: ns, Subtitle: ns, Depth: 1, Width: 0.85, Offset: 0.02, Heat: 0.35, SharePct: 85, Kind: "cpu"},
+		StackFrame{Label: top.Name, Subtitle: strconv.Itoa(top.PID), Depth: 2, Width: 0.7, Offset: 0.08, Heat: 0.55, SharePct: 70, Kind: "cpu"},
 	)
 	offset := 0.12
 	for index, part := range parts {
@@ -338,43 +352,164 @@ func inferKernelPath(processName string, network NetworkProfile) string {
 	return "entry_SYSCALL_64 → schedule → run_queue"
 }
 
-func buildKernelHotspots(processes []ProcessSample, network NetworkProfile, kernelFrames []string, stackSource string) []KernelHotspot {
-	if (stackSource == "proc" || stackSource == "ebpf") && len(kernelFrames) > 0 {
-		share := 1.0 / float64(len(kernelFrames))
-		hotspots := make([]KernelHotspot, 0, len(kernelFrames))
+func isSyscallEntryStub(label string) bool {
+	name := strings.ToLower(strings.TrimSpace(label))
+	stubs := []string{
+		"el0t_64_sync",
+		"el0t_64_sync_handler",
+		"el0_svc",
+		"do_el0_svc",
+		"el0_svc_common",
+		"invoke_syscall",
+		"entry_syscall_64",
+		"do_syscall_64",
+		"syscall_exit_to_user_mode",
+		"syscall_return_via_sysret",
+		"ret_from_fork",
+		"entry_SYSCALL_64",
+	}
+	for _, stub := range stubs {
+		if name == strings.ToLower(stub) || strings.HasPrefix(name, strings.ToLower(stub)+".") {
+			return true
+		}
+	}
+	return strings.HasPrefix(name, "el0_") && (strings.Contains(name, "sync") || strings.Contains(name, "svc"))
+}
+
+func kernelCategory(function string) string {
+	name := strings.ToLower(function)
+	switch {
+	case strings.Contains(name, "futex"),
+		strings.Contains(name, "mutex"),
+		strings.Contains(name, "rwsem"),
+		strings.Contains(name, "spinlock"),
+		strings.Contains(name, "spin_lock"),
+		strings.Contains(name, "down_write"),
+		strings.Contains(name, "down_read"),
+		strings.Contains(name, "up_write"),
+		strings.Contains(name, "up_read"):
+		return "Synchronization"
+	case strings.Contains(name, "tcp_"),
+		strings.Contains(name, "udp_"),
+		strings.Contains(name, "sock"),
+		strings.Contains(name, "net_"),
+		strings.Contains(name, "ip_"),
+		strings.Contains(name, "sk_"),
+		strings.Contains(name, "napi"):
+		return "Networking"
+	case strings.Contains(name, "ext4"),
+		strings.Contains(name, "xfs"),
+		strings.Contains(name, "vfs_"),
+		strings.Contains(name, "file_"),
+		strings.Contains(name, "iov_"),
+		strings.Contains(name, "iomap"),
+		strings.Contains(name, "read_iter"),
+		strings.Contains(name, "write_iter"):
+		return "Filesystem"
+	case strings.Contains(name, "schedule"),
+		strings.Contains(name, "pick_next"),
+		strings.Contains(name, "finish_task"),
+		strings.Contains(name, "try_to_wake"),
+		strings.Contains(name, "run_queue"):
+		return "Scheduler"
+	case strings.Contains(name, "copy_to_user"),
+		strings.Contains(name, "copy_from_user"),
+		strings.Contains(name, "page_fault"),
+		strings.Contains(name, "handle_mm"),
+		strings.Contains(name, "reclaim"),
+		strings.Contains(name, "alloc_pages"),
+		strings.Contains(name, "kmem"):
+		return "Memory"
+	default:
+		return "Other"
+	}
+}
+
+func buildKernelHotspots(processes []ProcessSample, network NetworkProfile, cpuStack []StackFrame, kernelFrames []string, stackSource string) []KernelHotspot {
+	type agg struct {
+		samples int
+		depth   int
+	}
+	counts := map[string]*agg{}
+	total := 0
+
+	if (stackSource == "proc" || stackSource == "ebpf") && len(cpuStack) > 0 {
+		for _, frame := range cpuStack {
+			if frame.Depth < 3 || isSyscallEntryStub(frame.Label) {
+				continue
+			}
+			weight := frame.Samples
+			if weight <= 0 {
+				weight = max(1, frame.SharePct)
+			}
+			item := counts[frame.Label]
+			if item == nil {
+				item = &agg{}
+				counts[frame.Label] = item
+			}
+			item.samples += weight
+			if frame.Depth > item.depth {
+				item.depth = frame.Depth
+			}
+			total += weight
+		}
+	}
+
+	// Fallback: flat label list from kernel frames (still filter stubs).
+	if total == 0 && len(kernelFrames) > 0 {
 		for _, label := range kernelFrames {
+			if isSyscallEntryStub(label) {
+				continue
+			}
+			item := counts[label]
+			if item == nil {
+				item = &agg{samples: 1, depth: 3}
+				counts[label] = item
+			} else {
+				item.samples++
+			}
+			total++
+		}
+	}
+
+	if total > 0 {
+		hotspots := make([]KernelHotspot, 0, len(counts))
+		for label, item := range counts {
+			share := float64(item.samples) / float64(total)
 			hotspots = append(hotspots, KernelHotspot{
 				Function: label,
 				Share:    share,
-				Meaning:  "Stack frame from node performance sampling",
+				// Meaning:  "Stack frame from node performance sampling",
+				Meaning:  kernelMeaning(label, network),
+				Category: kernelCategory(label),
 			})
 		}
 		sort.Slice(hotspots, func(i, j int) bool {
+			if hotspots[i].Share == hotspots[j].Share {
+				return hotspots[i].Function < hotspots[j].Function
+			}
 			return hotspots[i].Share > hotspots[j].Share
 		})
-		if len(hotspots) > 5 {
-			hotspots = hotspots[:5]
+		if len(hotspots) > 8 {
+			hotspots = hotspots[:8]
 		}
 		return hotspots
 	}
 
+	// Inferred fallback — prefer meaningful paths over syscall stubs.
 	hotspots := []KernelHotspot{}
 	path := inferKernelPath("", network)
 	for index, part := range strings.Split(path, " → ") {
+		if isSyscallEntryStub(part) {
+			continue
+		}
 		share := max(0.15, 0.45-float64(index)*0.08)
 		hotspots = append(hotspots, KernelHotspot{
 			Function: part,
 			Share:    share,
 			Meaning:  kernelMeaning(part, network),
+			Category: kernelCategory(part),
 		})
-	}
-
-	if len(processes) > 0 && processes[0].Pod != "" {
-		hotspots = append([]KernelHotspot{{
-			Function: processes[0].Pod,
-			Share:    0.2,
-			Meaning:  "Top CPU pod on this node",
-		}}, hotspots...)
 	}
 
 	sort.Slice(hotspots, func(i, j int) bool {
@@ -387,17 +522,21 @@ func buildKernelHotspots(processes []ProcessSample, network NetworkProfile, kern
 }
 
 func kernelMeaning(function string, network NetworkProfile) string {
-	switch function {
-	case "tcp_sendmsg", "ip_queue_xmit", "dev_queue_xmit":
+	switch {
+	case strings.Contains(function, "futex"):
+		return "Thread synchronization / wait path"
+	case strings.Contains(function, "tcp_sendmsg"), strings.Contains(function, "ip_queue_xmit"), strings.Contains(function, "dev_queue_xmit"):
 		return "High network send path CPU"
-	case "do_epoll_wait", "epoll_wait":
+	case strings.Contains(function, "tcp_recvmsg"), strings.Contains(function, "udp_recv"):
+		return "Network receive path CPU"
+	case strings.Contains(function, "do_epoll_wait"), strings.Contains(function, "epoll_wait"):
 		return "Event loop waiting with active syscalls"
-	case "schedule", "run_queue":
-		return "Scheduler pressure on runnable threads"
-	case "copy_user":
+	case strings.Contains(function, "schedule"), strings.Contains(function, "run_queue"):
+		return "Scheduler pressure on runnable / sleeping threads"
+	case strings.Contains(function, "copy_to_user"), strings.Contains(function, "copy_from_user"), strings.Contains(function, "copy_user"):
 		return "User/kernel memory copies"
-	case "ext4_write":
-		return "Filesystem write path in kernel"
+	case strings.Contains(function, "ext4"), strings.Contains(function, "vfs_"), strings.Contains(function, "file_read"), strings.Contains(function, "file_write"):
+		return "Filesystem I/O path in kernel"
 	default:
 		if network.Drops > 0 {
 			return "Network drops detected on this node"

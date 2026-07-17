@@ -55,7 +55,8 @@ func (c *platformCollector) Snapshot(flows *store.FlowStore) Snapshot {
 	kernelMem := readKernelMemory(memDetail, memUsed, memTotal)
 	cpuStack, stackSource := buildCPUStack(processes, network, c.stackSampler)
 	kernelFrames := kernelFrameLabels(cpuStack, stackSource)
-	hotspots := buildKernelHotspots(processes, network, kernelFrames, stackSource)
+	// hotspots := buildKernelHotspots(processes, network, kernelFrames, stackSource)
+	hotspots := buildKernelHotspots(processes, network, cpuStack, kernelFrames, stackSource)
 	oomDelta := c.kernelEvents.observeOOMKill()
 	timeline := mergeTimelineEvents(readKernelEvents(oomDelta), buildTimeline(psi, memDetail, cpuPercent, processes))
 

@@ -73,6 +73,7 @@ export interface KernelHotspot {
   function: string;
   share: number;
   meaning?: string;
+  category?: string;
 }
 
 export interface TimelineEvent {
@@ -238,6 +239,7 @@ export interface AgentProfilePayload {
     function: string;
     share: number;
     meaning?: string;
+    category?: string;
   }>;
   cpu_stack?: ProfileStackFrame[];
   stack_source?: ProfileStackSource;
