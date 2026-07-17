@@ -12,19 +12,43 @@ const maxNodeFlameProcesses = 10
 const maxStackDepthShown = 12
 
 	// buildCPUStack builds a node-wide performance flame:
+	// Prefer a merged eBPF pyramid (identical frames coalesce across processes).
+	// Fallback: CPU Samples → pod → process → stack lanes when only /proc stacks are available.
 	// all - pod - process  kernel/user frames (siblings sized by CPU share).
 	// Node CPU  pod  process  kernel/user frames (siblings sized by CPU share).
-func buildCPUStack(processes []ProcessSample, network NetworkProfile, sampler StackSampler) ([]StackFrame, string) {
+func buildCPUStack(processes []ProcessSample, network NetworkProfile, sampler StackSampler, nodeName string) ([]StackFrame, string) {
 	if len(processes) == 0 {
 		return network.Stack, "inferred"
 	}
-	return buildNodePerformanceFlame(processes, sampler)
+	return buildNodePerformanceFlame(processes, sampler, nodeName)
 }
 
-func buildNodePerformanceFlame(processes []ProcessSample, sampler StackSampler) ([]StackFrame, string) {
+func buildNodePerformanceFlame(processes []ProcessSample, sampler StackSampler, nodeName string) ([]StackFrame, string) {
 	ranked := rankProcessesForFlame(processes)
 	if len(ranked) == 0 {
 		return nil, "inferred"
+	}
+
+	// Classic flamegraph: merge all sampled stacks into one pyramid (no per-pod towers).
+	if sampler != nil && sampler.Available() {
+		if flame := sampler.FlameFrames(0); len(flame) > 1 {
+			for i := range flame {
+				if flame[i].Depth == 0 || flame[i].Kind == "root" {
+					// flame[i].Label = "CPU Samples"
+					flame[i].Label = "Node CPU"
+					flame[i].Kind = "root"
+					if strings.TrimSpace(nodeName) != "" {
+						flame[i].Subtitle = nodeName
+					} else {
+						flame[i].Subtitle = "100%"
+					}
+					flame[i].SharePct = 100
+					flame[i].Width = 1
+					flame[i].Offset = 0
+				}
+			}
+			return flame, "ebpf"
+		}
 	}
 
 	totalCPU := 0.0
@@ -33,13 +57,16 @@ func buildNodePerformanceFlame(processes []ProcessSample, sampler StackSampler) 
 	}
 
 	source := "inferred"
-	if sampler != nil && sampler.Available() {
-		source = "ebpf"
-	}
+
+	// rootSubtitle := "100%"
+	// if strings.TrimSpace(nodeName) != "" {
+	// 	rootSubtitle = nodeName
+	// }
 
 	frames := []StackFrame{{
 		ID: "node-all",
 		// Label:    "all",
+		// Label: "CPU Samples",
 		Label: "Node CPU",
 		Depth:  0,
 		Width:  1,
@@ -47,10 +74,14 @@ func buildNodePerformanceFlame(processes []ProcessSample, sampler StackSampler) 
 		Heat:   0.1,
 		SharePct: 100,
 		Samples:  estimateSamples(totalCPU),
-		Kind:     "cpu",
+		Kind:     "root",
 		// Subtitle: "node",
 		Subtitle: "100%",
+		// Subtitle: rootSubtitle,
 	}}
+	if strings.TrimSpace(nodeName) != "" {
+		frames[0].Subtitle = nodeName
+	}
 
 	type podBucket struct {
 		key       string
@@ -152,7 +183,7 @@ func processStackFrames(proc ProcessSample, sampler StackSampler, offset, width 
 		if flame := sampler.FlameFrames(proc.PID); len(flame) > 0 {
 			out := make([]StackFrame, 0, len(flame))
 			for _, frame := range flame {
-				if frame.Label == "all" || frame.Label == "Node CPU" || frame.Depth == 0 {
+				if frame.Label == "all" || frame.Label == "Node CPU" || frame.Label == "CPU Samples" || frame.Depth == 0 {
 					continue
 				}
 				shifted := frame
@@ -161,8 +192,13 @@ func processStackFrames(proc ProcessSample, sampler StackSampler, offset, width 
 					continue
 				}
 				shifted.Offset = offset + frame.Offset*width
-				shifted.Width = max(0.02, frame.Width*width)
-				shifted.Kind = "cpu"
+				// shifted.Width = max(0.02, frame.Width*width)
+				shifted.Width = frame.Width * width
+				// Preserve user/kernel kind from the sampler when present.
+				// shifted.Kind = "cpu"
+				if shifted.Kind == "" {
+					shifted.Kind = "cpu"
+				}
 				if shifted.ID == "" {
 					shifted.ID = fmt.Sprintf("stack-%d-%d-%s", proc.PID, shifted.Depth, shifted.Label)
 				}
@@ -194,13 +230,15 @@ func processStackFrames(proc ProcessSample, sampler StackSampler, offset, width 
 	out := make([]StackFrame, 0, len(kernel))
 	n := len(kernel)
 	for index, label := range kernel {
-		// Linear shrink within the process lane (icicle under process).
-		frac := 1.0 - float64(index)*0.08
-		if frac < 0.25 {
-			frac = 0.25
-		}
-		frameWidth := width * frac
-		share := int((frameWidth/width)*100 + 0.5)
+		// Single /proc stack: each depth spans the full process lane (solid icicle column).
+		// // Linear shrink within the process lane (icicle under process).
+		// frac := 1.0 - float64(index)*0.08
+		// if frac < 0.25 {
+		// 	frac = 0.25
+		// }
+		// frameWidth := width * frac
+		frameWidth := width
+		share := int((frameWidth)*100 + 0.5)
 		if width <= 0 {
 			share = max(1, 100/n)
 		}
@@ -213,7 +251,7 @@ func processStackFrames(proc ProcessSample, sampler StackSampler, offset, width 
 			Heat:     min(1, 0.55+float64(index)*0.04),
 			SharePct: max(1, share),
 			Samples:  max(1, estimateSamples(proc.CPUPercent)*(n-index)/n),
-			Kind:     "cpu",
+			Kind:     "kernel",
 			Path:     strings.Join(kernel[:index+1], " → "),
 		})
 	}
@@ -258,13 +296,13 @@ func estimateSamples(cpuPercent float64) int {
 }
 
 func decorateCPUFlame(top ProcessSample, flame []StackFrame) []StackFrame {
-	frames, _ := buildNodePerformanceFlame([]ProcessSample{top}, nil)
+	frames, _ := buildNodePerformanceFlame([]ProcessSample{top}, nil, "")
 	_ = flame
 	return frames
 }
 
 func buildCPUStackFromKernel(top ProcessSample, kernelFrames []string) []StackFrame {
-	frames, _ := buildNodePerformanceFlame([]ProcessSample{top}, nil)
+	frames, _ := buildNodePerformanceFlame([]ProcessSample{top}, nil, "")
 	if len(kernelFrames) == 0 {
 		return frames
 	}
@@ -272,7 +310,9 @@ func buildCPUStackFromKernel(top ProcessSample, kernelFrames []string) []StackFr
 	_ = extra
 	out := []StackFrame{
 		// {ID: "node-all", Label: "all", Depth: 0, Width: 1, Offset: 0, Heat: 0.1, SharePct: 100, Samples: estimateSamples(top.CPUPercent), Kind: "cpu"},
-		{ID: "node-all", Label: "Node CPU", Depth: 0, Width: 1, Offset: 0, Heat: 0.1, SharePct: 100, Samples: estimateSamples(top.CPUPercent), Kind: "cpu", Subtitle: "100%"},
+		// {ID: "node-all", Label: "Node CPU", Depth: 0, Width: 1, Offset: 0, Heat: 0.1, SharePct: 100, Samples: estimateSamples(top.CPUPercent), Kind: "cpu", Subtitle: "100%"},
+		// {ID: "node-all", Label: "CPU Samples", Depth: 0, Width: 1, Offset: 0, Heat: 0.1, SharePct: 100, Samples: estimateSamples(top.CPUPercent), Kind: "root", Subtitle: "100%"},
+		{ID: "node-all", Label: "Node CPU", Depth: 0, Width: 1, Offset: 0, Heat: 0.1, SharePct: 100, Samples: estimateSamples(top.CPUPercent), Kind: "root", Subtitle: "100%"},
 	}
 	key, label, ns := podKey(top)
 	out = append(out,
@@ -301,7 +341,7 @@ func buildCPUStackFromKernel(top ProcessSample, kernelFrames []string) []StackFr
 }
 
 func buildInferredCPUStack(processes []ProcessSample, network NetworkProfile) []StackFrame {
-	frames, _ := buildNodePerformanceFlame(processes, nil)
+	frames, _ := buildNodePerformanceFlame(processes, nil, "")
 	if len(frames) > 0 {
 		return frames
 	}
@@ -310,7 +350,9 @@ func buildInferredCPUStack(processes []ProcessSample, network NetworkProfile) []
 	parts := strings.Split(kernelPath, " → ")
 	out := []StackFrame{
 		// {Label: "all", Depth: 0, Width: 1, Offset: 0, Heat: 0.12, SharePct: 100, Kind: "cpu"},
-		{Label: "Node CPU", Depth: 0, Width: 1, Offset: 0, Heat: 0.12, SharePct: 100, Kind: "cpu", Subtitle: "100%"},
+		// {Label: "Node CPU", Depth: 0, Width: 1, Offset: 0, Heat: 0.12, SharePct: 100, Kind: "cpu", Subtitle: "100%"},
+		// {Label: "CPU Samples", Depth: 0, Width: 1, Offset: 0, Heat: 0.12, SharePct: 100, Kind: "root", Subtitle: "100%"},
+		{Label: "Node CPU", Depth: 0, Width: 1, Offset: 0, Heat: 0.12, SharePct: 100, Kind: "root", Subtitle: "100%"},
 	}
 	_, label, ns := podKey(top)
 	out = append(out,
@@ -425,6 +467,22 @@ func kernelCategory(function string) string {
 	}
 }
 
+func isImplausibleClusterKernelSymbol(label string) bool {
+	name := strings.ToLower(strings.TrimSpace(label))
+	noise := []string{
+		"mipi_", "drm_", "amdgpu", "i915_", "nouveau", "radeon",
+		"snd_", "sound/", "hdmi", "v4l2", "videobuf",
+		"usb_hcd", "hid_", "input_event", "evdev",
+		"bluetooth", "rfkill", "nfc_",
+	}
+	for _, prefix := range noise {
+		if strings.Contains(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func buildKernelHotspots(processes []ProcessSample, network NetworkProfile, cpuStack []StackFrame, kernelFrames []string, stackSource string) []KernelHotspot {
 	type agg struct {
 		samples int
@@ -435,7 +493,12 @@ func buildKernelHotspots(processes []ProcessSample, network NetworkProfile, cpuS
 
 	if (stackSource == "proc" || stackSource == "ebpf") && len(cpuStack) > 0 {
 		for _, frame := range cpuStack {
-			if frame.Depth < 3 || isSyscallEntryStub(frame.Label) {
+			// Only real kernel frames — user/library frames used to leak into this list.
+			// if frame.Depth < 3 || isSyscallEntryStub(frame.Label) {
+			if frame.Kind != "kernel" || isSyscallEntryStub(frame.Label) || isImplausibleClusterKernelSymbol(frame.Label) {
+				continue
+			}
+			if strings.HasPrefix(frame.Label, "0x") {
 				continue
 			}
 			weight := frame.Samples
@@ -458,7 +521,8 @@ func buildKernelHotspots(processes []ProcessSample, network NetworkProfile, cpuS
 	// Fallback: flat label list from kernel frames (still filter stubs).
 	if total == 0 && len(kernelFrames) > 0 {
 		for _, label := range kernelFrames {
-			if isSyscallEntryStub(label) {
+			// if isSyscallEntryStub(label) {
+			if isSyscallEntryStub(label) || isImplausibleClusterKernelSymbol(label) || strings.HasPrefix(label, "0x") {
 				continue
 			}
 			item := counts[label]

@@ -25,6 +25,7 @@ type StackFrame struct {
 	LatencyMs    uint32  `json:"latencyMs,omitempty"`
 	SharePct     int     `json:"sharePct,omitempty"`
 	Samples      int     `json:"samples,omitempty"`
+	Binary       string  `json:"binary,omitempty"`
 	Path         string  `json:"path,omitempty"`
 	FlowCount    int     `json:"flowCount,omitempty"`
 }

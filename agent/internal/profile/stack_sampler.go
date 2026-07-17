@@ -6,7 +6,8 @@ type StackSampler interface {
 	Available() bool
 	// SampleTopProcess returns the hottest resolved frames for pid (leaf-first or root-first).
 	SampleTopProcess(pid int) []string
-	// FlameFrames returns aggregated flame-ready stack frames for a pid, or nil.
+	// FlameFrames returns aggregated flame-ready stack frames.
+	// Pass pid <= 0 for a node-wide merged flame (classic pyramid); pid > 0 scopes to that process.
 	FlameFrames(pid int) []StackFrame
 	Close()
 }

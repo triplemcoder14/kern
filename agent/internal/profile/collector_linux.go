@@ -53,7 +53,7 @@ func (c *platformCollector) Snapshot(flows *store.FlowStore) Snapshot {
 		topPods = c.collectPodsFromCgroups(16)
 	}
 	kernelMem := readKernelMemory(memDetail, memUsed, memTotal)
-	cpuStack, stackSource := buildCPUStack(processes, network, c.stackSampler)
+	cpuStack, stackSource := buildCPUStack(processes, network, c.stackSampler, nodeName)
 	kernelFrames := kernelFrameLabels(cpuStack, stackSource)
 	// hotspots := buildKernelHotspots(processes, network, kernelFrames, stackSource)
 	hotspots := buildKernelHotspots(processes, network, cpuStack, kernelFrames, stackSource)
