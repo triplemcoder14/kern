@@ -56,15 +56,21 @@ export function flameLabelColor(heat: number): string {
   return heat >= 0.48 ? "#fff8f0" : "#0f1a12";
 }
 
-/** Tone class from share percentage for selected-frame chips. */
+/** Tone class from share of node CPU for selected-frame chips / legend. */
 export function flameShareTone(sharePct?: number): "good" | "warn" | "hot" {
   if (sharePct === undefined) {
     return "good";
   }
-  if (sharePct >= 35) {
+  // if (sharePct >= 35) {
+  //   return "hot";
+  // }
+  // if (sharePct >= 15) {
+  //   return "warn";
+  // }
+  if (sharePct >= 20) {
     return "hot";
   }
-  if (sharePct >= 15) {
+  if (sharePct >= 10) {
     return "warn";
   }
   return "good";

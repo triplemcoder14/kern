@@ -374,6 +374,7 @@ function mapKernelHotspots(agent?: AgentProfilePayload): KernelHotspot[] {
     function: hotspot.function,
     share: hotspot.share,
     meaning: hotspot.meaning,
+    category: hotspot.category,
   }));
 }
 
