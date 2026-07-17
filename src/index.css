@@ -4893,17 +4893,25 @@ tbody tr.selected {
   text-align: left;
   cursor: pointer;
   user-select: none;
+  touch-action: manipulation;
   transition: background 0.15s ease, border-color 0.15s ease;
 }
 
+/* Keep hits on the button itself so child text never steals the click. */
 .profile-node * {
   pointer-events: none;
 }
 
-.profile-node:hover {
+.profile-node:hover,
+.profile-node:active {
   background: rgba(255, 255, 255, 0.04);
   border-color: color-mix(in srgb, var(--fg) 12%, transparent);
 }
+
+/* .profile-node:hover {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: color-mix(in srgb, var(--fg) 12%, transparent);
+} */
 
 .profile-node:focus-visible {
   outline: 2px solid var(--accent, #2f6fed);
@@ -7575,17 +7583,25 @@ tbody tr.selected {
   text-align: left;
   cursor: pointer;
   user-select: none;
+  touch-action: manipulation;
   transition: background 0.15s ease, border-color 0.15s ease;
 }
 
+/* Keep hits on the button itself so child text never steals the click. */
 .profile-node * {
   pointer-events: none;
 }
 
-.profile-node:hover {
+.profile-node:hover,
+.profile-node:active {
   background: rgba(255, 255, 255, 0.04);
   border-color: color-mix(in srgb, var(--fg) 12%, transparent);
 }
+
+/* .profile-node:hover {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: color-mix(in srgb, var(--fg) 12%, transparent);
+} */
 
 .profile-node:focus-visible {
   outline: 2px solid var(--accent, #2f6fed);
@@ -9427,6 +9443,153 @@ tbody tr.selected {
   background: color-mix(in srgb, var(--text) 6%, transparent);
 }
 
+.memory-ws-breakdown-value {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.memory-ws-breakdown-value em {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.memory-ws-util {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.memory-ws-util-text {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.memory-ws-util-text em {
+  font-style: normal;
+  color: var(--muted);
+}
+
+.memory-ws-util-bar {
+  display: block;
+  width: 100%;
+  max-width: 120px;
+  height: 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+  overflow: hidden;
+}
+
+.memory-ws-util-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+}
+
+.memory-ws-util-fill-ok { background: #2f9e62; }
+.memory-ws-util-fill-warn { background: #d4a017; }
+.memory-ws-util-fill-bad { background: #d94a2a; }
+
+.memory-ws-util-pct {
+  font-size: 10px;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+}
+
+.memory-ws-util-pct-ok { color: #2f9e62; }
+.memory-ws-util-pct-warn { color: #d4a017; }
+.memory-ws-util-pct-bad { color: #d94a2a; }
+
+.memory-ws-detail-groups {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 8px;
+}
+
+.memory-ws-detail-group {
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--panel-raised) 55%, transparent);
+}
+
+.memory-ws-detail-group-title {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+.memory-ws-detail-grid-compact {
+  grid-template-columns: 1fr;
+  gap: 8px;
+  margin-bottom: 0;
+}
+
+.memory-ws-pressure-strip {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.memory-ws-note-inline {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.memory-ws-oom-rail {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.memory-ws-oom-rail-line {
+  flex: 1;
+  height: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 14%, transparent);
+}
+
+.memory-ws-oom-rail-label {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.memory-ws-investigate {
+  position: relative;
+  z-index: 2;
+  margin-top: 12px;
+  border: 1px solid color-mix(in srgb, #7aadff 55%, var(--border));
+  background: color-mix(in srgb, #7aadff 10%, transparent);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 14px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.memory-ws-investigate:hover {
+  background: color-mix(in srgb, #7aadff 18%, transparent);
+}
+
+@media (max-width: 900px) {
+  .memory-ws-detail-groups {
+    grid-template-columns: 1fr;
+  }
+}
+
+
 .memory-ws-risk {
   display: flex;
   flex-direction: column;
@@ -9434,6 +9597,11 @@ tbody tr.selected {
   font-size: 11px;
   font-weight: 600;
   align-items: flex-start;
+  line-height: 1.25;
+}
+
+.memory-ws-risk-label {
+  white-space: normal;
 }
 
 .memory-ws-risk-bar {
