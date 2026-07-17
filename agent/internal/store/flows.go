@@ -30,6 +30,22 @@ type Flow struct {
 	BytesSent           *uint64   `json:"bytes_sent,omitempty"`
 	BytesReceived       *uint64   `json:"bytes_received,omitempty"`
 	Retransmits         *uint32   `json:"retransmits,omitempty"`
+	// TcpState / TcpEvent come from the L4 TCP collector.
+	TcpState string `json:"tcp_state,omitempty"`
+	TcpEvent string `json:"tcp_event,omitempty"`
+	// Dns* fields are filled by the DNS UDP sampler.
+	DnsQuery   string   `json:"dns_query,omitempty"`
+	DnsType    string   `json:"dns_type,omitempty"`
+	DnsRcode   string   `json:"dns_rcode,omitempty"`
+	DnsAnswers []string `json:"dns_answers,omitempty"`
+	DnsTxid    uint16   `json:"dns_txid,omitempty"`
+	// HttpMethod / HttpPath / HttpStatus are filled by the plaintext HTTP sampler.
+	HttpMethod string  `json:"http_method,omitempty"`
+	HttpPath   string  `json:"http_path,omitempty"`
+	HttpStatus *uint16 `json:"http_status,omitempty"`
+	// GrpcMethod / GrpcStatus are filled by the plaintext gRPC/HTTP2 sampler.
+	GrpcMethod string  `json:"grpc_method,omitempty"`
+	GrpcStatus *uint16 `json:"grpc_status,omitempty"`
 }
 
 type FlowStore struct {
@@ -54,6 +70,9 @@ func NewFlowStore() *FlowStore {
 }
 
 func flowKey(flow Flow) string {
+	if flow.DnsTxid != 0 || flow.DnsQuery != "" {
+		return fmt.Sprintf("dns:%d:%s:%s->%s", flow.DnsTxid, flow.DnsQuery, flow.SrcIP, flow.DstIP)
+	}
 	return fmt.Sprintf("%s->%s:%d/%s", flow.SrcIP, flow.DstIP, flow.Port, flow.Protocol)
 }
 
@@ -76,11 +95,14 @@ func (s *FlowStore) Upsert(flow Flow) {
 	key := flowKey(flow)
 	now := time.Now().UTC()
 	flow.Timestamp = now
+	measuredLatency := flow.LatencyMs
 
 	if first, ok := s.firstSeen[key]; ok {
 		flow.FirstSeen = first
-		latency := estimateLatencyMs(key, first, now)
-		flow.LatencyMs = &latency
+		if measuredLatency == nil {
+			latency := estimateLatencyMs(key, first, now)
+			flow.LatencyMs = &latency
+		}
 	} else {
 		flow.FirstSeen = now
 		s.firstSeen[key] = now
@@ -98,11 +120,136 @@ func (s *FlowStore) Upsert(flow Flow) {
 		}
 		if flow.Retransmits == nil {
 			flow.Retransmits = existing.Retransmits
+		} else if existing.Retransmits != nil && *existing.Retransmits > *flow.Retransmits {
+			flow.Retransmits = existing.Retransmits
+		}
+		if flow.TcpState == "" {
+			flow.TcpState = existing.TcpState
+		}
+		if flow.TcpEvent == "" {
+			flow.TcpEvent = existing.TcpEvent
+		}
+		if flow.SrcIP == "" {
+			flow.SrcIP = existing.SrcIP
+		}
+		if flow.SrcPod == "" {
+			flow.SrcPod = existing.SrcPod
+			flow.SrcNamespace = existing.SrcNamespace
+		}
+		if flow.SrcService == "" {
+			flow.SrcService = existing.SrcService
+			flow.SrcServiceNamespace = existing.SrcServiceNamespace
+		}
+		if flow.DstIP == "" {
+			flow.DstIP = existing.DstIP
+		}
+		if flow.HttpMethod == "" {
+			flow.HttpMethod = existing.HttpMethod
+		}
+		if flow.HttpPath == "" {
+			flow.HttpPath = existing.HttpPath
+		}
+		if flow.HttpStatus == nil {
+			flow.HttpStatus = existing.HttpStatus
+		}
+		if flow.GrpcMethod == "" {
+			flow.GrpcMethod = existing.GrpcMethod
+		}
+		if flow.GrpcStatus == nil {
+			flow.GrpcStatus = existing.GrpcStatus
+		}
+		// L4 updates must not erase a plaintext HTTP path annotation.
+		if flow.HttpMethod == "" && flow.HttpPath == "" && flow.HttpStatus == nil &&
+			(existing.HttpMethod != "" || existing.HttpPath != "" || existing.HttpStatus != nil) &&
+			existing.Path != "" {
+			flow.Path = existing.Path
+		}
+		// L4 updates must not erase a plaintext gRPC annotation.
+		if flow.GrpcMethod == "" && flow.GrpcStatus == nil &&
+			(existing.GrpcMethod != "" || existing.GrpcStatus != nil) &&
+			existing.Path != "" && flow.Path == "" {
+			flow.Path = existing.Path
+		}
+		// Retransmit probes should not erase a healthy established verdict.
+		if existing.Verdict == "OK" && flow.Verdict == "RETRY" {
+			flow.Verdict = "OK"
+		}
+		if measuredLatency == nil && existing.LatencyMs != nil {
+			flow.LatencyMs = existing.LatencyMs
+		}
+		if flow.DnsQuery == "" {
+			flow.DnsQuery = existing.DnsQuery
+		}
+		if flow.DnsType == "" {
+			flow.DnsType = existing.DnsType
+		}
+		if flow.DnsRcode == "" {
+			flow.DnsRcode = existing.DnsRcode
+		}
+		if len(flow.DnsAnswers) == 0 {
+			flow.DnsAnswers = existing.DnsAnswers
+		}
+		if flow.DnsTxid == 0 {
+			flow.DnsTxid = existing.DnsTxid
 		}
 		s.flows[idx] = flow
 		s.flowKeys[key] = now
 		s.bumpRate(now)
 		return
+	}
+
+	// Match DNS response onto an earlier query by txid + swapped endpoints.
+	if flow.DnsTxid != 0 && flow.DnsRcode != "" {
+		if idx := s.findDnsQuery(flow); idx >= 0 {
+			existing := s.flows[idx]
+			existing.LastSeen = now
+			existing.Timestamp = now
+			existing.DnsRcode = flow.DnsRcode
+			existing.DnsAnswers = flow.DnsAnswers
+			if flow.DnsType != "" {
+				existing.DnsType = flow.DnsType
+			}
+			if flow.DnsQuery != "" {
+				existing.DnsQuery = flow.DnsQuery
+			}
+			if existing.DstIP == "" && flow.DstIP != "" {
+				existing.DstIP = flow.DstIP
+			}
+			if existing.DstPod == "" && flow.DstPod != "" {
+				existing.DstPod = flow.DstPod
+				existing.DstNamespace = flow.DstNamespace
+			}
+			if existing.DstService == "" && flow.DstService != "" {
+				existing.DstService = flow.DstService
+				existing.DstServiceNamespace = flow.DstServiceNamespace
+			}
+			if existing.SrcIP == "" && flow.SrcIP != "" {
+				existing.SrcIP = flow.SrcIP
+			}
+			if existing.SrcPod == "" && flow.SrcPod != "" {
+				existing.SrcPod = flow.SrcPod
+				existing.SrcNamespace = flow.SrcNamespace
+			}
+			if existing.SrcService == "" && flow.SrcService != "" {
+				existing.SrcService = flow.SrcService
+				existing.SrcServiceNamespace = flow.SrcServiceNamespace
+			}
+			latency := uint32(now.Sub(existing.FirstSeen).Milliseconds())
+			if latency == 0 {
+				latency = 1
+			}
+			existing.LatencyMs = &latency
+			if flow.Verdict != "" {
+				existing.Verdict = flow.Verdict
+			}
+			if flow.Path != "" {
+				existing.Path = flow.Path
+			}
+			s.flows[idx] = existing
+			s.flowKeys[flowKey(existing)] = now
+			s.bumpRate(now)
+			return
+		}
 	}
 
 	s.flows = append([]Flow{flow}, s.flows...)
@@ -119,6 +266,29 @@ func (s *FlowStore) findIndex(key string) int {
 		if flowKey(s.flows[i]) == key {
 			return i
 		}
+	}
+	return -1
+}
+
+func (s *FlowStore) findDnsQuery(response Flow) int {
+	for i := range s.flows {
+		q := s.flows[i]
+		if q.DnsTxid != response.DnsTxid || q.DnsTxid == 0 {
+			continue
+		}
+		if q.DnsRcode != "" {
+			continue
+		}
+		// Prefer same query name when both sides decoded it.
+		if response.DnsQuery != "" && q.DnsQuery != "" && q.DnsQuery != response.DnsQuery {
+			continue
+		}
+		// Same DNS server, or server unknown on one side.
+		sameServer := q.DstIP == "" || response.DstIP == "" || q.DstIP == response.DstIP
+		if !sameServer {
+			continue
+		}
+		return i
 	}
 	return -1
 }

@@ -7,7 +7,7 @@ import {
   recentDroppedFlows,
   type NetworkPathRow,
 } from "../../../core/network/network-insights";
-import { buildGraphLayout, type GraphEdgeLayout } from "../../../core/network/graph-model";
+import { buildGraphLayout, type GraphEdgeLayout, type GraphLod } from "../../../core/network/graph-model";
 import { protocolClassLabel } from "../../../core/network/protocol-class";
 import { filterNetworkSnapshot } from "../../../core/network/scope";
 import type { NetworkFlow, NetworkSnapshot } from "../../../core/types/network";
@@ -102,10 +102,6 @@ function EbpfPanel({ snapshot }: { snapshot: NetworkSnapshot }) {
           </div>
         </dl>
       ) : null}
-      <p className="network-ws-note">
-        Latency is agent-estimated from L4 connect samples. Bytes and retransmits populate when the
-        collector fills those fields.
-      </p>
     </section>
   );
 }
@@ -481,7 +477,9 @@ export function NetworkWorkspace({
 }: NetworkWorkspaceProps) {
   const [tab, setTab] = useState<NetworkWorkspaceTab>(initialTab);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedPathId, setSelectedPathId] = useState<string | null>(null);
+  const [lod, setLod] = useState<GraphLod>("service");
 
   useEffect(() => {
     setTab(initialTab);
@@ -489,8 +487,8 @@ export function NetworkWorkspace({
 
   const scoped = useMemo(() => filterNetworkSnapshot(snapshot, namespace), [snapshot, namespace]);
   const layout = useMemo(
-    () => buildGraphLayout(scoped.topology, scoped.flows),
-    [scoped.topology, scoped.flows],
+    () => buildGraphLayout(scoped.topology, scoped.flows, { lod }),
+    [scoped.topology, scoped.flows, lod],
   );
 
   const selectedEdge =
@@ -554,7 +552,9 @@ export function NetworkWorkspace({
               <div className="panel-header panel-header-split">
                 <div className="panel-header-main">
                   <span>SERVICE MAP</span>
-                  <span className="panel-meta-inline">drag to pan · scroll to zoom · click edge</span>
+                  <span className="panel-meta-inline">
+                    click service to investigate · hover edge for latency · double-click to expand pods
+                  </span>
                 </div>
                 <GraphLegend />
               </div>
@@ -563,6 +563,11 @@ export function NetworkWorkspace({
                 connected={connected}
                 selectedEdgeId={selectedEdge?.id ?? null}
                 onSelectEdge={setSelectedEdgeId}
+                selectedNodeId={selectedNodeId}
+                onSelectNode={setSelectedNodeId}
+                lod={lod}
+                onLodChange={setLod}
+                showInspectPanel={false}
               />
             </section>
             <FlowDetailPanel

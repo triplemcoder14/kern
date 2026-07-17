@@ -24,6 +24,18 @@ export interface NetworkFlow {
   bytesSent?: number;
   bytesReceived?: number;
   retransmits?: number;
+  tcpState?: string;
+  tcpEvent?: string;
+  dnsQuery?: string;
+  dnsType?: string;
+  dnsRcode?: string;
+  dnsAnswers?: string[];
+  dnsTxid?: number;
+  httpMethod?: string;
+  httpPath?: string;
+  httpStatus?: number;
+  grpcMethod?: string;
+  grpcStatus?: number;
 }
 
 export interface NetworkNode {
@@ -97,4 +109,16 @@ export interface EbpfFlowPayload {
   bytes_sent?: number;
   bytes_received?: number;
   retransmits?: number;
+  tcp_state?: string;
+  tcp_event?: string;
+  dns_query?: string;
+  dns_type?: string;
+  dns_rcode?: string;
+  dns_answers?: string[];
+  dns_txid?: number;
+  http_method?: string;
+  http_path?: string;
+  http_status?: number;
+  grpc_method?: string;
+  grpc_status?: number;
 }

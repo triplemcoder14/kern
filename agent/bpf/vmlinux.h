@@ -51,4 +51,10 @@ enum bpf_map_type {
 	BPF_MAP_TYPE_TASK_STORAGE = 29,
 };
 
+enum {
+	BPF_ANY = 0,
+	BPF_NOEXIST = 1,
+	BPF_EXIST = 2,
+};
+
 #endif

@@ -33,18 +33,13 @@ export function TcpHealthTab({ flows }: { flows: NetworkFlow[] }) {
     { label: "TCP Drops", value: String(summary.drops) },
     { label: "Retransmits", value: String(summary.retransmits) },
     { label: "Timeouts", value: String(summary.timeouts) },
-    { label: "SYN Retries*", value: String(summary.retries) },
+    { label: "Resets", value: String(summary.resets) },
     { label: "OK", value: String(summary.ok) },
     { label: "P95 Latency", value: formatMs(summary.p95LatencyMs) },
   ];
 
   return (
     <div className="network-ws-overview">
-      <p className="network-ws-banner">
-        TCP Health is live from L4 connect/verdict samples. RST, listen-queue overflow, and socket
-        buffer pressure need deeper BPF — fields marked * are mapped from current verdicts.
-      </p>
-
       <div className="network-ws-cards">
         {cards.map((card) => (
           <div key={card.label} className="network-ws-card">

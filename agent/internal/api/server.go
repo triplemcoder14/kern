@@ -307,6 +307,28 @@ func flowToJSON(flow store.Flow) map[string]interface{} {
 	if flow.Retransmits != nil {
 		item["retransmits"] = *flow.Retransmits
 	}
+	// setOptional(item, "tcp_state", flow.TcpState)
+	// setOptional(item, "tcp_event", flow.TcpEvent)
+	setOptional(item, "tcp_state", flow.TcpState)
+	setOptional(item, "tcp_event", flow.TcpEvent)
+	setOptional(item, "dns_query", flow.DnsQuery)
+	setOptional(item, "dns_type", flow.DnsType)
+	setOptional(item, "dns_rcode", flow.DnsRcode)
+	if len(flow.DnsAnswers) > 0 {
+		item["dns_answers"] = flow.DnsAnswers
+	}
+	if flow.DnsTxid != 0 {
+		item["dns_txid"] = flow.DnsTxid
+	}
+	setOptional(item, "http_method", flow.HttpMethod)
+	setOptional(item, "http_path", flow.HttpPath)
+	if flow.HttpStatus != nil {
+		item["http_status"] = *flow.HttpStatus
+	}
+	setOptional(item, "grpc_method", flow.GrpcMethod)
+	if flow.GrpcStatus != nil {
+		item["grpc_status"] = *flow.GrpcStatus
+	}
 	return item
 }
 
