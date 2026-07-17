@@ -103,6 +103,7 @@ function formatCount(value: number): string {
 function oomRisk(usageMb?: number, limitMb?: number): {
   label: string;
   pct?: number;
+  remainingMb?: number;
   tone: "ok" | "warn" | "bad" | "neutral";
 } {
   if (usageMb === undefined && limitMb === undefined) {
@@ -110,25 +111,85 @@ function oomRisk(usageMb?: number, limitMb?: number): {
   }
   if (limitMb !== undefined && limitMb > 0 && usageMb !== undefined) {
     const pct = Math.min(100, Math.round((usageMb / limitMb) * 100));
+    const remainingMb = Math.max(0, Math.round(limitMb - usageMb));
+    // if (pct >= 90) {
+    //   return { label: "High", pct, tone: "bad" };
+    // }
+    // if (pct >= 70) {
+    //   return { label: "Watch", pct, tone: "warn" };
+    // }
+    // return { label: "Low", pct, tone: "ok" };
     if (pct >= 90) {
-      return { label: "High", pct, tone: "bad" };
+      return {
+        label: `${pct}% · ${remainingMb} MB left`,
+        pct,
+        remainingMb,
+        tone: "bad",
+      };
     }
     if (pct >= 70) {
-      return { label: "Watch", pct, tone: "warn" };
+      return {
+        label: `${pct}% · Pressure`,
+        pct,
+        remainingMb,
+        tone: "warn",
+      };
     }
-    return { label: "Low", pct, tone: "ok" };
+    return {
+      label: `${pct}% · OK`,
+      pct,
+      remainingMb,
+      tone: "ok",
+    };
   }
   if (usageMb === undefined) {
     return { label: "—", tone: "neutral" };
   }
   const rss = usageMb;
   if (rss >= 2048) {
-    return { label: "High", tone: "bad" };
+    return { label: "High RSS", tone: "bad" };
   }
   if (rss >= 512) {
-    return { label: "Watch", tone: "warn" };
+    return { label: "Elevated RSS", tone: "warn" };
   }
-  return { label: "Low", tone: "ok" };
+  return { label: "OK", tone: "ok" };
+}
+
+function formatMetricOrCollecting(value?: number, hasAnyInTable?: boolean): string {
+  if (value !== undefined) {
+    return formatMb(value);
+  }
+  // Show collecting only when the column is otherwise empty across the table.
+  return hasAnyInTable === false ? "Collecting…" : "—";
+}
+
+function LimitUtilBar({
+  usageMb,
+  limitMb,
+}: {
+  usageMb?: number;
+  limitMb?: number;
+}) {
+  if (usageMb === undefined) {
+    return <span>—</span>;
+  }
+  if (limitMb === undefined || limitMb <= 0) {
+    return <span>{formatMb(usageMb)}</span>;
+  }
+  const pct = Math.min(100, Math.round((usageMb / limitMb) * 100));
+  const tone = pct >= 90 ? "bad" : pct >= 70 ? "warn" : "ok";
+  return (
+    <span className="memory-ws-util" title={`${formatMb(usageMb)} / ${formatMb(limitMb)} (${pct}%)`}>
+      <span className="memory-ws-util-text">
+        {formatMb(usageMb)}
+        <em> / {formatMb(limitMb)}</em>
+      </span>
+      <span className="memory-ws-util-bar" aria-hidden>
+        <span className={`memory-ws-util-fill memory-ws-util-fill-${tone}`} style={{ width: `${pct}%` }} />
+      </span>
+      <span className={`memory-ws-util-pct memory-ws-util-pct-${tone}`}>{pct}%</span>
+    </span>
+  );
 }
 
 function psiLabel(level?: string): { text: string; tone: "ok" | "warn" | "bad" } {
@@ -306,10 +367,11 @@ function OomRiskCell({ usageMb, limitMb }: { usageMb?: number; limitMb?: number 
   const risk = oomRisk(usageMb, limitMb);
   return (
     <span className={`memory-ws-risk memory-ws-risk-${risk.tone}`}>
-      <span className="memory-ws-risk-label">
+      {/* <span className="memory-ws-risk-label">
         {risk.label}
         {risk.pct !== undefined ? ` (${risk.pct}%)` : ""}
-      </span>
+      </span> */}
+      <span className="memory-ws-risk-label">{risk.label}</span>
       {risk.pct !== undefined ? (
         <span className="memory-ws-risk-bar" aria-hidden>
           <span style={{ width: `${risk.pct}%` }} />
@@ -323,14 +385,36 @@ function ConsumerTable({
   rows,
   processes,
   timeline,
+  detail,
   onInvestigate,
 }: {
   rows: ConsumerRow[];
   processes: ProcessSample[];
   timeline: TimelineEvent[];
+  detail: NodeProfileDetail;
   onInvestigate: (target: InvestigationTarget) => void;
 }) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  const showAnonymous = rows.some((row) => row.anonymousMb !== undefined);
+  const showCache = rows.some((row) => row.cacheMb !== undefined);
+  const showFaults = rows.some(
+    (row) => row.majorFaults !== undefined || row.minorFaults !== undefined,
+  );
+
+  const gridTemplateColumns = [
+    "minmax(140px, 1.4fr)",
+    "minmax(90px, 0.9fr)",
+    "minmax(64px, 0.55fr)",
+    "minmax(170px, 1.4fr)",
+    showAnonymous ? "minmax(72px, 0.55fr)" : null,
+    showCache ? "minmax(64px, 0.5fr)" : null,
+    showFaults ? "minmax(110px, 0.85fr)" : null,
+    "minmax(64px, 0.55fr)",
+    "minmax(120px, 1fr)",
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   if (rows.length === 0) {
     return <div className="profile-log-empty">No memory consumers on this node yet.</div>;
@@ -339,32 +423,51 @@ function ConsumerTable({
   return (
     <div className="memory-ws-consumers-scroll">
       <div className="profile-table-wrap memory-ws-consumers-table">
-        <div className="profile-table-head memory-ws-pod-head">
+        <div className="profile-table-head memory-ws-pod-head" style={{ gridTemplateColumns }}>
           <span>Name</span>
           <span>Scope</span>
           <span>RSS</span>
-          <span>Working Set</span>
-          <span>Anonymous</span>
-          <span>Cache</span>
-          <span>Major Faults</span>
+          {/* <span>Working Set</span> */}
+          <span>Memory</span>
+          {showAnonymous ? <span>Anonymous</span> : null}
+          {showCache ? <span>Cache</span> : null}
+          {showFaults ? <span>Major Faults</span> : null}
           <span>Growth</span>
-          <span>OOM Risk</span>
+          {/* <span>OOM Risk</span> */}
+          <span>Limit pressure</span>
         </div>
         {rows.map((row) => {
           const growth = formatGrowth(row.growthMb);
           const expanded = expandedId === row.id;
+          const usageMb = row.workingSetMb ?? row.rssMb;
+          const risk = oomRisk(usageMb, row.memoryLimitMb);
           const relatedProcs = row.podKey
             ? processes.filter((proc) => `${proc.namespace ?? ""}/${proc.pod ?? ""}` === row.podKey)
             : processes.filter((proc) => proc.name === row.name).slice(0, 6);
           const oomEvents = timeline.filter((event) =>
             `${event.title} ${event.detail ?? ""}`.toLowerCase().includes("oom"),
           );
+          const investigation: InvestigationTarget =
+            row.investigation ??
+            (row.kind === "processes"
+              ? {
+                  kind: "process",
+                  pid: Number(row.id.split(":")[1]) || 0,
+                  name: row.name,
+                }
+              : {
+                  kind: "pod",
+                  namespace: row.scope.includes("/") ? row.scope.split("/")[0] : row.scope,
+                  pod: row.name,
+                  rssMb: row.rssMb,
+                });
 
           return (
             <div key={row.id} className={`memory-ws-consumer${expanded ? " memory-ws-consumer-open" : ""}`}>
               <button
                 type="button"
                 className="profile-table-row memory-ws-pod-row profile-table-row-button"
+                style={{ gridTemplateColumns }}
                 aria-expanded={expanded}
                 onClick={() => setExpandedId(expanded ? null : row.id)}
               >
@@ -376,46 +479,89 @@ function ConsumerTable({
                 </span>
                 <span>{row.scope}</span>
                 <span>{formatMb(row.rssMb)}</span>
-                <span>{formatMb(row.workingSetMb)}</span>
-                <span>{formatMb(row.anonymousMb)}</span>
-                <span>{formatMb(row.cacheMb)}</span>
-                <span>{formatFaults(row.majorFaults, row.minorFaults)}</span>
+                <LimitUtilBar usageMb={usageMb} limitMb={row.memoryLimitMb} />
+                {showAnonymous ? (
+                  <span>{formatMetricOrCollecting(row.anonymousMb, showAnonymous)}</span>
+                ) : null}
+                {showCache ? <span>{formatMetricOrCollecting(row.cacheMb, showCache)}</span> : null}
+                {showFaults ? <span>{formatFaults(row.majorFaults, row.minorFaults)}</span> : null}
                 <span className={`memory-ws-growth memory-ws-growth-${growth.tone}`}>{growth.text}</span>
-                <OomRiskCell usageMb={row.workingSetMb ?? row.rssMb} limitMb={row.memoryLimitMb} />
+                <OomRiskCell usageMb={usageMb} limitMb={row.memoryLimitMb} />
               </button>
               {expanded ? (
                 <div className="memory-ws-row-detail">
-                  <div className="memory-ws-detail-grid">
-                    <div>
-                      <span className="memory-ws-detail-label">RSS</span>
-                      <strong>{formatMb(row.rssMb)}</strong>
+                  <div className="memory-ws-detail-groups">
+                    <div className="memory-ws-detail-group">
+                      <span className="memory-ws-detail-group-title">Memory</span>
+                      <div className="memory-ws-detail-grid memory-ws-detail-grid-compact">
+                        <div>
+                          <span className="memory-ws-detail-label">RSS</span>
+                          <strong>{formatMb(row.rssMb)}</strong>
+                        </div>
+                        <div>
+                          <span className="memory-ws-detail-label">Working Set</span>
+                          <strong>{formatMb(row.workingSetMb)}</strong>
+                        </div>
+                        <div>
+                          <span className="memory-ws-detail-label">Anonymous</span>
+                          <strong>
+                            {row.anonymousMb !== undefined ? formatMb(row.anonymousMb) : "Collecting…"}
+                          </strong>
+                        </div>
+                      </div>
                     </div>
-                    <div>
-                      <span className="memory-ws-detail-label">Working Set</span>
-                      <strong>{formatMb(row.workingSetMb)}</strong>
+
+                    <div className="memory-ws-detail-group">
+                      <span className="memory-ws-detail-group-title">Limits</span>
+                      <div className="memory-ws-detail-grid memory-ws-detail-grid-compact">
+                        <div>
+                          <span className="memory-ws-detail-label">Limit</span>
+                          <strong>{formatMb(row.memoryLimitMb)}</strong>
+                        </div>
+                        <div>
+                          <span className="memory-ws-detail-label">Remaining</span>
+                          <strong>
+                            {risk.remainingMb !== undefined ? formatMb(risk.remainingMb) : "—"}
+                          </strong>
+                        </div>
+                        <div>
+                          <span className="memory-ws-detail-label">Pressure</span>
+                          <strong className={`memory-ws-risk-${risk.tone}`}>{risk.label}</strong>
+                          {row.memoryLimitMb !== undefined && usageMb !== undefined ? (
+                            <LimitUtilBar usageMb={usageMb} limitMb={row.memoryLimitMb} />
+                          ) : null}
+                        </div>
+                      </div>
                     </div>
-                    <div>
-                      <span className="memory-ws-detail-label">Anonymous</span>
-                      <strong>{formatMb(row.anonymousMb)}</strong>
-                    </div>
-                    <div>
-                      <span className="memory-ws-detail-label">Page Cache</span>
-                      <strong>{formatMb(row.cacheMb)}</strong>
-                    </div>
-                    <div>
-                      <span className="memory-ws-detail-label">Limit</span>
-                      <strong>{formatMb(row.memoryLimitMb)}</strong>
-                    </div>
-                    <div>
-                      <span className="memory-ws-detail-label">Growth</span>
-                      <strong className={`memory-ws-growth-${growth.tone}`}>{growth.text}</strong>
+
+                    <div className="memory-ws-detail-group">
+                      <span className="memory-ws-detail-group-title">Events</span>
+                      <div className="memory-ws-detail-grid memory-ws-detail-grid-compact">
+                        <div>
+                          <span className="memory-ws-detail-label">Growth</span>
+                          <strong className={`memory-ws-growth-${growth.tone}`}>{growth.text}</strong>
+                        </div>
+                        <div>
+                          <span className="memory-ws-detail-label">Page cache</span>
+                          <strong>
+                            {row.cacheMb !== undefined ? formatMb(row.cacheMb) : "Collecting…"}
+                          </strong>
+                        </div>
+                        <div>
+                          <span className="memory-ws-detail-label">Major faults</span>
+                          <strong>{formatFaults(row.majorFaults, row.minorFaults)}</strong>
+                        </div>
+                      </div>
                     </div>
                   </div>
 
                   <div className="memory-ws-detail-section">
                     <span className="profile-panel-label">Processes</span>
                     {relatedProcs.length === 0 ? (
-                      <p className="memory-ws-note">No attributed processes in this sample.</p>
+                      // <p className="memory-ws-note">No attributed processes in this sample.</p>
+                      <p className="memory-ws-note">
+                        Process attribution was not available for this capture.
+                      </p>
                     ) : (
                       <ul className="memory-ws-proc-list">
                         {relatedProcs.slice(0, 8).map((proc) => (
@@ -433,6 +579,28 @@ function ConsumerTable({
 
                   <div className="memory-ws-detail-section">
                     <span className="profile-panel-label">Pressure / OOM</span>
+                    <div className="memory-ws-pressure-strip">
+                      <div>
+                        <span className="memory-ws-detail-label">Memory PSI</span>
+                        <strong className={`memory-ws-risk-${psiLabel(detail.psi.memoryLevel).tone}`}>
+                          {psiLabel(detail.psi.memoryLevel).text}
+                        </strong>
+                        {detail.psi.memoryAvg10 !== undefined ? (
+                          <span className="memory-ws-note-inline">avg10 {detail.psi.memoryAvg10}</span>
+                        ) : null}
+                      </div>
+                      <div>
+                        <span className="memory-ws-detail-label">OOM timeline</span>
+                        {oomEvents.length === 0 ? (
+                          <div className="memory-ws-oom-rail" aria-hidden>
+                            <span className="memory-ws-oom-rail-line" />
+                            <span className="memory-ws-oom-rail-label">No events</span>
+                          </div>
+                        ) : (
+                          <strong>{oomEvents.length} event(s)</strong>
+                        )}
+                      </div>
+                    </div>
                     {oomEvents.length === 0 ? (
                       <p className="memory-ws-note">No OOM kills in the current timeline window.</p>
                     ) : (
@@ -452,15 +620,22 @@ function ConsumerTable({
                     )}
                   </div>
 
-                  {row.investigation ? (
-                    <button
-                      type="button"
-                      className="memory-ws-investigate"
-                      onClick={() => onInvestigate(row.investigation!)}
-                    >
-                      Open investigation
-                    </button>
-                  ) : null}
+                  <button
+                    type="button"
+                    className="memory-ws-investigate"
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      onInvestigate(investigation);
+                      requestAnimationFrame(() => {
+                        document
+                          .querySelector(".profile-investigation")
+                          ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+                      });
+                    }}
+                  >
+                    Open investigation
+                  </button>
                 </div>
               ) : null}
             </div>
@@ -491,7 +666,10 @@ function BreakdownPanel({ detail }: { detail: NodeProfileDetail }) {
             <li key={row.label}>
               <div className="memory-ws-breakdown-row">
                 <span>{row.label}</span>
-                <span>{formatMb(row.mb)}</span>
+                <span className="memory-ws-breakdown-value">
+                  {formatMb(row.mb)}
+                  {row.mb !== undefined ? <em>{Math.round(pct)}%</em> : null}
+                </span>
               </div>
               <div className="memory-ws-breakdown-bar" aria-hidden>
                 <span style={{ width: `${pct}%` }} />
@@ -533,6 +711,7 @@ function OomPanel({ detail }: { detail: NodeProfileDetail }) {
     `${event.title} ${event.detail ?? ""}`.toLowerCase().includes("oom"),
   );
   const count = detail.memoryDetail.oomEvents ?? oomEvents.length;
+  const psi = psiLabel(detail.psi.memoryLevel);
 
   return (
     <section className="panel memory-ws-panel">
@@ -540,6 +719,26 @@ function OomPanel({ detail }: { detail: NodeProfileDetail }) {
       <div className="memory-ws-oom-summary">
         <strong>{count}</strong>
         <span>OOM events observed on this node</span>
+      </div>
+      <div className="memory-ws-pressure-strip">
+        <div>
+          <span className="memory-ws-detail-label">Memory PSI</span>
+          <strong className={`memory-ws-risk-${psi.tone}`}>{psi.text}</strong>
+          {detail.psi.memoryAvg10 !== undefined ? (
+            <span className="memory-ws-note-inline">avg10 {detail.psi.memoryAvg10}</span>
+          ) : null}
+        </div>
+        <div>
+          <span className="memory-ws-detail-label">OOM timeline</span>
+          {oomEvents.length === 0 ? (
+            <div className="memory-ws-oom-rail" aria-hidden>
+              <span className="memory-ws-oom-rail-line" />
+              <span className="memory-ws-oom-rail-label">No events</span>
+            </div>
+          ) : (
+            <strong>{oomEvents.length} event(s)</strong>
+          )}
+        </div>
       </div>
       {oomEvents.length === 0 ? (
         <p className="memory-ws-note">No recent OOM kills in the timeline window.</p>
@@ -761,6 +960,7 @@ export function MemoryWorkspace({
         rows={rows}
         processes={processes}
         timeline={timeline}
+        detail={detail}
         onInvestigate={onInvestigate}
       />
     </section>
@@ -796,6 +996,10 @@ export function MemoryWorkspace({
       {tab === "overview" ? (
         <div className="memory-ws-overview">
           <SummaryCards detail={detail} />
+          <div className="memory-ws-overview-grid">
+            <BreakdownPanel detail={detail} />
+            <OomPanel detail={detail} />
+          </div>
           <MemoryMapBar
             usedMb={detail.memoryUsedMb}
             totalMb={detail.memoryTotalMb}
@@ -803,10 +1007,6 @@ export function MemoryWorkspace({
             slabMb={detail.memoryDetail.slabMb}
             buffersMb={detail.memoryDetail.buffersMb}
           />
-          <div className="memory-ws-overview-grid">
-            <BreakdownPanel detail={detail} />
-            <OomPanel detail={detail} />
-          </div>
           {consumersPanel}
         </div>
       ) : null}

@@ -296,7 +296,8 @@ export function ProfilingDashboard({
   const [investigationTarget, setInvestigationTarget] = useState<InvestigationTarget | null>(null);
   const { profile, loading, error } = useNodeProfile(connected, selectedNode);
 
-  const activeNode = profile.selected?.name ?? selectedNode ?? profile.nodes[0]?.name;
+  const activeNode = selectedNode ?? profile.selected?.name ?? profile.nodes[0]?.name;
+  // const activeNode = profile.selected?.name ?? selectedNode ?? profile.nodes[0]?.name;
   const detail = profile.selected;
   const selectedStackLabel = investigationTarget?.kind === "stack" ? investigationTarget.label : undefined;
 
@@ -402,7 +403,20 @@ export function ProfilingDashboard({
                     role="option"
                     aria-selected={activeNode === node.name}
                     className={`profile-node${activeNode === node.name ? " profile-node-active" : ""}`}
-                    onClick={() => {
+                    // onClick={() => {
+                    //   setSelectedNode(node.name);
+                    //   setInvestigationTarget(null);
+                    // }}
+                    onPointerDown={(event) => {
+                      if (event.button !== 0) {
+                        return;
+                      }
+                      setSelectedNode(node.name);
+                      setInvestigationTarget(null);
+                    }}
+                    onClick={(event) => {
+                      // Keep click for keyboard / accessibility; pointerdown already selected.
+                      event.preventDefault();
                       setSelectedNode(node.name);
                       setInvestigationTarget(null);
                     }}

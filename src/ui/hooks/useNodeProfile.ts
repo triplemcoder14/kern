@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ProfileSnapshot } from "../../core/types/profiling";
 import { fetchProfileSnapshot } from "../../lib/profile-api";
 
@@ -11,13 +11,23 @@ export function useNodeProfile(connected: boolean, selectedNode?: string) {
   const [profile, setProfile] = useState<ProfileSnapshot>(EMPTY_PROFILE);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const hasNodesRef = useRef(false);
+
+  useEffect(() => {
+    hasNodesRef.current = profile.nodes.length > 0;
+  }, [profile.nodes.length]);
 
   const refresh = useCallback(async () => {
     if (!connected) {
       setProfile(EMPTY_PROFILE);
+      setLoading(false);
       return;
     }
-    setLoading(true);
+    // setLoading(true);
+    // Soft refresh: keep current profile visible while switching nodes / polling.
+    if (!hasNodesRef.current) {
+      setLoading(true);
+    }
     setError(null);
     try {
       const snapshot = await fetchProfileSnapshot(selectedNode);
