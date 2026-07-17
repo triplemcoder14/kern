@@ -28,30 +28,23 @@ interface ProfilingDashboardProps {
 
 type ProfilerTab = "overview" | "cpu" | "memory" | "network" | "timeline";
 
-function stackSourceBanner(source?: ProfileStackSource, hasCpuFrames?: boolean): string {
-  if (source === "ebpf" && hasCpuFrames) {
-    return "Live PSI and memory from the agent. CPU flame stacks from eBPF sampling.";
-  }
-  if (source === "proc" && hasCpuFrames) {
-    return "Live PSI and memory from the agent. CPU stacks sampled from /proc.";
-  }
-  if (source === "ebpf" && !hasCpuFrames) {
-    return "Live PSI and memory from the agent. eBPF sampler is attached — waiting for the first CPU stack frames.";
-  }
-  return "Live PSI and memory from the agent. Waiting for eBPF stack samples on this node.";
-}
-
 function cpuStackLabel(source?: ProfileStackSource): string {
-  if (source === "ebpf") {
-    return "Node performance flamegraph (eBPF)";
-  }
-  if (source === "proc") {
-    return "Node performance flamegraph (/proc)";
-  }
-  return "Node performance flamegraph";
+  // if (source === "ebpf") {
+  //   return "Node performance flamegraph (eBPF)";
+  // }
+  // if (source === "proc") {
+  //   return "Node performance flamegraph (/proc)";
+  // }
+  // return "Node performance flamegraph";
+  void source;
+  return "CPU flamegraph";
 }
 
 /** Keep root + frames belonging to pods in the selected Kubernetes namespace. */
+function isCpuRootLabel(label: string): boolean {
+  return label === "all" || label === "Node CPU" || label === "CPU Samples";
+}
+
 function scopeCpuFrames<T extends { depth: number; offset: number; width: number; namespace?: string; label: string }>(
   frames: T[],
   namespace: string,
@@ -63,10 +56,12 @@ function scopeCpuFrames<T extends { depth: number; offset: number; width: number
     (frame) => frame.depth === 1 && frame.namespace === namespace,
   );
   if (pods.length === 0) {
-    return frames.filter((frame) => frame.depth === 0 || frame.label === "all");
+    // return frames.filter((frame) => frame.depth === 0 || isCpuRootLabel(frame.label));
+    // Merged eBPF pyramid has no pod lanes — keep the full stack under namespace filter.
+    return frames;
   }
   return frames.filter((frame) => {
-    if (frame.depth === 0 || frame.label === "all") {
+    if (frame.depth === 0 || isCpuRootLabel(frame.label)) {
       return true;
     }
     return pods.some(
@@ -91,6 +86,51 @@ function healthLabel(health: NodeHealth): string {
   return "Unknown";
 }
 
+function nodeDegradeReason(detail: {
+  health: NodeHealth;
+  cpuPercent?: number;
+  memoryUsedMb?: number;
+  memoryTotalMb?: number;
+  psi?: { cpuAvg10?: number; memoryAvg10?: number };
+  psiCpuLevel?: string;
+  psiMemoryLevel?: string;
+}): { reason: string; parts: string[] } | null {
+  if (detail.health === "ok") {
+    return null;
+  }
+  const memPct =
+    detail.memoryUsedMb !== undefined && detail.memoryTotalMb
+      ? Math.round((detail.memoryUsedMb / detail.memoryTotalMb) * 100)
+      : undefined;
+  const parts: string[] = [];
+  if (detail.cpuPercent !== undefined) {
+    parts.push(`CPU ${detail.cpuPercent.toFixed(0)}%`);
+  }
+  if (memPct !== undefined) {
+    parts.push(`Memory ${memPct}%`);
+  }
+  const psiCpu = detail.psi?.cpuAvg10;
+  const psiMem = detail.psi?.memoryAvg10;
+  if (psiCpu !== undefined && psiCpu >= 0.1) {
+    parts.push(`PSI ${psiCpu.toFixed(2)}`);
+  } else if (detail.psiCpuLevel && detail.psiCpuLevel !== "normal") {
+    parts.push(`PSI ${psiBadge(detail.psiCpuLevel)}`);
+  }
+
+  let reason = "Pressure detected";
+  if ((psiMem !== undefined && psiMem >= 0.2) || detail.psiMemoryLevel === "critical" || detail.psiMemoryLevel === "warn") {
+    reason = "Memory pressure";
+  } else if ((psiCpu !== undefined && psiCpu >= 0.2) || detail.psiCpuLevel === "critical" || detail.psiCpuLevel === "warn") {
+    reason = "CPU pressure";
+  } else if (memPct !== undefined && memPct >= 85) {
+    reason = "High memory use";
+  } else if ((detail.cpuPercent ?? 0) >= 80) {
+    reason = "High CPU use";
+  }
+
+  return { reason, parts };
+}
+
 function psiBadge(level?: string): string {
   if (level === "critical") {
     return "Critical";
@@ -112,34 +152,132 @@ function Sparkline({ values, tone }: { values: number[]; tone?: string }) {
   );
 }
 
-function PodTable({ pods, onSelect }: { pods: PodConsumer[]; onSelect: (target: InvestigationTarget) => void }) {
-  if (pods.length === 0) {
-    return <div className="profile-log-empty">No memory consumers on this node yet.</div>;
+function CpuShareBar({ percent }: { percent?: number }) {
+  if (percent === undefined) {
+    return <span className="profile-cpu-bar-empty">—</span>;
   }
+  const width = Math.max(2, Math.min(100, percent));
+  const tone = flameShareTone(percent);
+  return (
+    <span className="profile-cpu-bar" title={`${percent.toFixed(1)}%`}>
+      <span className="profile-cpu-bar-track" aria-hidden>
+        <span className={`profile-cpu-bar-fill profile-cpu-bar-fill-${tone}`} style={{ width: `${width}%` }} />
+      </span>
+      <span className="profile-cpu-bar-label">{percent.toFixed(1)}%</span>
+    </span>
+  );
+}
+
+function memoryMbLabel(pod: PodConsumer): string {
+  // Prefer working set when cache column would otherwise be empty dashes.
+  const mb = pod.workingSetMb ?? pod.rssMb;
+  return mb !== undefined ? `${mb}MB` : "—";
+}
+
+function selectionPodKey(target: InvestigationTarget | null): string | null {
+  if (!target) {
+    return null;
+  }
+  if (target.kind === "pod") {
+    return `${target.namespace}/${target.pod}`;
+  }
+  if (target.kind === "process" && target.pod) {
+    return `${target.namespace ?? ""}/${target.pod}`;
+  }
+  if (target.kind === "stack") {
+    if (target.depth === 1) {
+      return target.namespace ? `${target.namespace}/${target.label}` : target.label;
+    }
+    if (target.path?.includes("/")) {
+      return target.path;
+    }
+  }
+  return null;
+}
+
+function selectionPid(target: InvestigationTarget | null): number | null {
+  if (!target) {
+    return null;
+  }
+  if (target.kind === "process") {
+    return target.pid;
+  }
+  if (target.kind === "stack" && target.depth === 2 && target.subtitle && /^\d+$/.test(target.subtitle)) {
+    return Number(target.subtitle);
+  }
+  return null;
+}
+
+function selectionKernelFn(target: InvestigationTarget | null): string | null {
+  if (!target) {
+    return null;
+  }
+  if (target.kind === "kernel") {
+    return target.function;
+  }
+  if (target.kind === "stack" && (target.depth ?? 0) >= 3) {
+    return target.label;
+  }
+  return null;
+}
+
+function PodTable({
+  pods,
+  onSelect,
+  selected,
+}: {
+  pods: PodConsumer[];
+  onSelect: (target: InvestigationTarget) => void;
+  selected: InvestigationTarget | null;
+}) {
+  if (pods.length === 0) {
+    return <div className="profile-log-empty">No CPU consumers on this node yet.</div>;
+  }
+
+  const focusPod = selectionPodKey(selected);
+  const ranked = [...pods].sort((a, b) => (b.cpuPercent ?? 0) - (a.cpuPercent ?? 0));
 
   return (
     <div className="profile-table-wrap">
-      <div className="profile-table-head profile-table-head-memory">
+      {/* <div className="profile-table-head profile-table-head-memory">
         <span>Pod</span>
         <span>Namespace</span>
         <span>RSS</span>
         <span>Cache</span>
         <span>CPU</span>
+      </div> */}
+      <div className="profile-table-head profile-table-head-cpu-pods">
+        <span>Pod</span>
+        <span>CPU</span>
+        <span>Working set</span>
+        <span>Namespace</span>
       </div>
-      {pods.map((pod) => (
-        <button
-          key={`${pod.namespace}/${pod.pod}`}
-          type="button"
-          className="profile-table-row profile-table-row-memory profile-table-row-button"
-          onClick={() => onSelect({ kind: "pod", namespace: pod.namespace, pod: pod.pod, cpuPercent: pod.cpuPercent, rssMb: pod.rssMb })}
-        >
-          <span>{pod.pod}</span>
-          <span>{pod.namespace}</span>
-          <span>{pod.rssMb !== undefined ? `${pod.rssMb}MB` : "—"}</span>
-          <span>{pod.cacheMb !== undefined ? `${pod.cacheMb}MB` : "—"}</span>
-          <span>{pod.cpuPercent !== undefined ? `${pod.cpuPercent.toFixed(1)}%` : "—"}</span>
-        </button>
-      ))}
+      {ranked.map((pod) => {
+        const key = `${pod.namespace}/${pod.pod}`;
+        const active = focusPod === key || focusPod === pod.pod;
+        const dimmed = Boolean(focusPod) && !active;
+        return (
+          <button
+            key={key}
+            type="button"
+            className={`profile-table-row profile-table-row-cpu-pods profile-table-row-button${active ? " profile-table-row-active" : ""}${dimmed ? " profile-table-row-dimmed" : ""}`}
+            onClick={() =>
+              onSelect({
+                kind: "pod",
+                namespace: pod.namespace,
+                pod: pod.pod,
+                cpuPercent: pod.cpuPercent,
+                rssMb: pod.rssMb,
+              })
+            }
+          >
+            <span>{pod.pod}</span>
+            <CpuShareBar percent={pod.cpuPercent} />
+            <span>{memoryMbLabel(pod)}</span>
+            <span>{pod.namespace}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -147,43 +285,69 @@ function PodTable({ pods, onSelect }: { pods: PodConsumer[]; onSelect: (target: 
 function ProcessTable({
   processes,
   onSelect,
+  selected,
 }: {
   processes: ProcessSample[];
   onSelect: (target: InvestigationTarget) => void;
+  selected: InvestigationTarget | null;
 }) {
   if (processes.length === 0) {
     return null;
   }
 
+  const focusPid = selectionPid(selected);
+  const focusPod = selectionPodKey(selected);
+  const ranked = [...processes].sort((a, b) => (b.cpuPercent ?? 0) - (a.cpuPercent ?? 0));
+
   return (
     <div className="profile-table-wrap">
-      <div className="profile-table-head profile-table-head-procs">
+      {/* <div className="profile-table-head profile-table-head-procs">
         <span>Process</span>
         <span>PID</span>
         <span>CPU</span>
         <span>RSS</span>
+      </div> */}
+      <div className="profile-table-head profile-table-head-cpu-procs">
+        <span>Process</span>
+        <span>CPU</span>
+        <span>RSS</span>
+        <span>Pod</span>
       </div>
-      {processes.slice(0, 8).map((proc) => (
-        <button
-          key={proc.pid}
-          type="button"
-          className="profile-table-row profile-table-row-procs profile-table-row-button"
-          onClick={() =>
-            onSelect({
-              kind: "process",
-              pid: proc.pid,
-              name: proc.name,
-              namespace: proc.namespace,
-              pod: proc.pod,
-            })
-          }
-        >
-          <span>{proc.pod ? `${proc.namespace}/${proc.pod}` : proc.name}</span>
-          <span>{proc.pid}</span>
-          <span>{proc.cpuPercent !== undefined ? `${proc.cpuPercent.toFixed(1)}%` : "—"}</span>
-          <span>{proc.rssMb !== undefined ? `${proc.rssMb}MB` : "—"}</span>
-        </button>
-      ))}
+      {ranked.slice(0, 8).map((proc) => {
+        const active =
+          focusPid === proc.pid ||
+          (focusPod !== null &&
+            proc.pod !== undefined &&
+            (focusPod === `${proc.namespace ?? ""}/${proc.pod}` || focusPod === proc.pod));
+        const dimmed = Boolean(focusPid || focusPod) && !active;
+        return (
+          <button
+            key={proc.pid}
+            type="button"
+            className={`profile-table-row profile-table-row-cpu-procs profile-table-row-button${active ? " profile-table-row-active" : ""}${dimmed ? " profile-table-row-dimmed" : ""}`}
+            onClick={() =>
+              onSelect({
+                kind: "process",
+                pid: proc.pid,
+                name: proc.name,
+                namespace: proc.namespace,
+                pod: proc.pod,
+              })
+            }
+          >
+            <span className="profile-proc-name">
+              <span className="profile-proc-name-main">{proc.name}</span>
+              <span className="profile-proc-name-sub">PID {proc.pid}</span>
+            </span>
+            <CpuShareBar percent={proc.cpuPercent} />
+            <span>{proc.rssMb !== undefined ? `${proc.rssMb}MB` : "—"}</span>
+            {/* <span>{proc.pod ? proc.pod : "node"}</span> */}
+            <span className={!proc.pod ? "profile-proc-pod-host" : undefined}>
+              {proc.pod ? proc.pod : "host"}
+            </span>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -191,44 +355,74 @@ function ProcessTable({
 function HotspotList({
   hotspots,
   onSelect,
+  selected,
 }: {
   hotspots: KernelHotspot[];
   onSelect: (target: InvestigationTarget) => void;
+  selected: InvestigationTarget | null;
 }) {
-  if (hotspots.length === 0) {
+  const meaningful = hotspots.filter((hotspot) => {
+    const name = hotspot.function.toLowerCase();
+    return !(
+      name.startsWith("el0") ||
+      name.includes("invoke_syscall") ||
+      name.includes("do_el0_svc") ||
+      name.includes("entry_syscall")
+    );
+  });
+  const rows = meaningful.length > 0 ? meaningful : hotspots;
+  if (rows.length === 0) {
     return null;
   }
+
+  const focusFn = selectionKernelFn(selected);
+  const grouped = new Map<string, KernelHotspot[]>();
+  for (const hotspot of rows) {
+    const category = hotspot.category ?? "Other";
+    const list = grouped.get(category) ?? [];
+    list.push(hotspot);
+    grouped.set(category, list);
+  }
+
   return (
     <div className="profile-hotspots">
-      <span className="profile-panel-label">Top kernel functions</span>
-      {hotspots.map((hotspot) => {
-        const pct = hotspot.share * 100;
-        const tone = flameShareTone(pct);
-        return (
-          <button
-            key={hotspot.function}
-            type="button"
-            className="profile-hotspot-row profile-hotspot-row-button"
-            onClick={() =>
-              onSelect({
-                kind: "kernel",
-                function: hotspot.function,
-                share: hotspot.share,
-                meaning: hotspot.meaning,
-              })
-            }
-          >
-            <span className="profile-hotspot-fn">{hotspot.function}</span>
-            <span
-              className={`profile-hotspot-share profile-hotspot-share-${tone}`}
-              style={{ color: flameColor(Math.min(1, hotspot.share * 2.2)) }}
-            >
-              {pct.toFixed(0)}%
-            </span>
-            <span className="profile-hotspot-meaning">{hotspot.meaning ?? "Kernel path"}</span>
-          </button>
-        );
-      })}
+      {/* <span className="profile-panel-label">Top kernel functions</span> */}
+      <span className="profile-panel-label">Kernel hotspots</span>
+      {[...grouped.entries()].map(([category, items]) => (
+        <div key={category} className="profile-hotspot-group">
+          <span className="profile-hotspot-category">{category}</span>
+          {items.map((hotspot) => {
+            const pct = hotspot.share * 100;
+            const tone = flameShareTone(pct);
+            const active = focusFn === hotspot.function;
+            const dimmed = Boolean(focusFn) && !active;
+            return (
+              <button
+                key={hotspot.function}
+                type="button"
+                className={`profile-hotspot-row profile-hotspot-row-button${active ? " profile-table-row-active" : ""}${dimmed ? " profile-table-row-dimmed" : ""}`}
+                onClick={() =>
+                  onSelect({
+                    kind: "kernel",
+                    function: hotspot.function,
+                    share: hotspot.share,
+                    meaning: hotspot.meaning,
+                  })
+                }
+              >
+                <span className="profile-hotspot-fn">{hotspot.function}</span>
+                <span
+                  className={`profile-hotspot-share profile-hotspot-share-${tone}`}
+                  style={{ color: flameColor(Math.min(1, hotspot.share * 2.2)) }}
+                >
+                  {pct.toFixed(0)}%
+                </span>
+                <span className="profile-hotspot-meaning">{hotspot.meaning ?? "Kernel path"}</span>
+              </button>
+            );
+          })}
+        </div>
+      ))}
     </div>
   );
 }
@@ -294,9 +488,15 @@ export function ProfilingDashboard({
   const [selectedNode, setSelectedNode] = useState<string | undefined>();
   const [activeTab, setActiveTab] = useState<ProfilerTab>("overview");
   const [investigationTarget, setInvestigationTarget] = useState<InvestigationTarget | null>(null);
-  const { profile, loading, error } = useNodeProfile(connected, selectedNode);
+  const [flamePaused, setFlamePaused] = useState(false);
+  // const { profile, loading, error } = useNodeProfile(connected, selectedNode);
+  // Pause node profile polling while the flame is frozen for inspection.
+  const { profile, loading, error } = useNodeProfile(connected, selectedNode, {
+    paused: flamePaused,
+  });
 
-  const activeNode = profile.selected?.name ?? selectedNode ?? profile.nodes[0]?.name;
+  const activeNode = selectedNode ?? profile.selected?.name ?? profile.nodes[0]?.name;
+  // const activeNode = profile.selected?.name ?? selectedNode ?? profile.nodes[0]?.name;
   const detail = profile.selected;
   const selectedStackLabel = investigationTarget?.kind === "stack" ? investigationTarget.label : undefined;
 
@@ -402,7 +602,20 @@ export function ProfilingDashboard({
                     role="option"
                     aria-selected={activeNode === node.name}
                     className={`profile-node${activeNode === node.name ? " profile-node-active" : ""}`}
-                    onClick={() => {
+                    // onClick={() => {
+                    //   setSelectedNode(node.name);
+                    //   setInvestigationTarget(null);
+                    // }}
+                    onPointerDown={(event) => {
+                      if (event.button !== 0) {
+                        return;
+                      }
+                      setSelectedNode(node.name);
+                      setInvestigationTarget(null);
+                    }}
+                    onClick={(event) => {
+                      // Keep click for keyboard / accessibility; pointerdown already selected.
+                      event.preventDefault();
                       setSelectedNode(node.name);
                       setInvestigationTarget(null);
                     }}
@@ -436,6 +649,26 @@ export function ProfilingDashboard({
                     <span className={`profile-badge profile-badge-${detail.health}`}>
                       {healthLabel(detail.health)}
                     </span>
+                    {(() => {
+                      const degrade = nodeDegradeReason({
+                        health: detail.health,
+                        cpuPercent: detail.cpuPercent,
+                        memoryUsedMb: detail.memoryUsedMb,
+                        memoryTotalMb: detail.memoryTotalMb,
+                        psi: detail.psi,
+                        psiCpuLevel: detail.psi.cpuLevel,
+                        psiMemoryLevel: detail.psi.memoryLevel,
+                      });
+                      if (!degrade) {
+                        return null;
+                      }
+                      return (
+                        <span className="profile-degrade-reason" title={degrade.parts.join(" · ")}>
+                          {degrade.reason}
+                          {degrade.parts.length > 0 ? ` · ${degrade.parts.join(" · ")}` : ""}
+                        </span>
+                      );
+                    })()}
                     <span className="profile-breadcrumb">
                       {detail.name}
                       {investigationTarget?.kind === "pod"
@@ -453,10 +686,6 @@ export function ProfilingDashboard({
                       {detail.agentLive ? "live agent" : detail.cpuPercent !== undefined ? "metrics-server" : "derived"}
                     </span>
                   </div>
-                </div>
-
-                <div className="profile-inferred-banner">
-                  {stackSourceBanner(detail.stackSource, scopedCpuStack.length > 0)}
                 </div>
 
                 <div className="profile-tabs" role="tablist">
@@ -483,6 +712,12 @@ export function ProfilingDashboard({
                       variant="cpu"
                       onSelect={setInvestigationTarget}
                       selectedLabel={selectedStackLabel}
+                      sampleSeconds={detail.sampleSeconds}
+                      sampleHz={20}
+                      nodeName={detail.name}
+                      paused={flamePaused}
+                      onPausedChange={setFlamePaused}
+                      processes={scopedProcesses}
                     />
                     <TimelineList events={detail.timeline.slice(0, 5)} />
                   </>
@@ -496,13 +731,33 @@ export function ProfilingDashboard({
                       variant="cpu"
                       onSelect={setInvestigationTarget}
                       selectedLabel={selectedStackLabel}
+                      sampleSeconds={detail.sampleSeconds}
+                      sampleHz={20}
+                      nodeName={detail.name}
+                      paused={flamePaused}
+                      onPausedChange={setFlamePaused}
+                      processes={scopedProcesses}
                     />
-                    <HotspotList hotspots={detail.kernelHotspots} onSelect={setInvestigationTarget} />
+                    <HotspotList
+                      hotspots={detail.kernelHotspots}
+                      onSelect={setInvestigationTarget}
+                      selected={investigationTarget}
+                    />
                     <div className="profile-overview-card profile-overview-wide">
-                      <span className="profile-panel-label">Top pods</span>
-                      <PodTable pods={scopedPods} onSelect={setInvestigationTarget} />
-                      <span className="profile-panel-label">Processes</span>
-                      <ProcessTable processes={scopedProcesses} onSelect={setInvestigationTarget} />
+                      {/* <span className="profile-panel-label">Top pods</span> */}
+                      <span className="profile-panel-label">Top workloads</span>
+                      <PodTable
+                        pods={scopedPods}
+                        onSelect={setInvestigationTarget}
+                        selected={investigationTarget}
+                      />
+                      {/* <span className="profile-panel-label">Processes</span> */}
+                      <span className="profile-panel-label">Top processes</span>
+                      <ProcessTable
+                        processes={scopedProcesses}
+                        onSelect={setInvestigationTarget}
+                        selected={investigationTarget}
+                      />
                     </div>
                   </>
                 ) : null}
@@ -550,7 +805,10 @@ export function ProfilingDashboard({
             <InvestigationPanel
               detail={detail}
               target={investigationTarget}
-              onClear={() => setInvestigationTarget(null)}
+              onClear={() => {
+                setInvestigationTarget(null);
+                setFlamePaused(false);
+              }}
             />
           ) : null}
         </div>

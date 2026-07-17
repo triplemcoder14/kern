@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ProfileSnapshot } from "../../core/types/profiling";
 import { fetchProfileSnapshot } from "../../lib/profile-api";
 
@@ -7,17 +7,32 @@ const EMPTY_PROFILE: ProfileSnapshot = {
   updatedAt: "",
 };
 
-export function useNodeProfile(connected: boolean, selectedNode?: string) {
+export function useNodeProfile(
+  connected: boolean,
+  selectedNode?: string,
+  options?: { paused?: boolean },
+) {
   const [profile, setProfile] = useState<ProfileSnapshot>(EMPTY_PROFILE);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const hasNodesRef = useRef(false);
+  const paused = Boolean(options?.paused);
+
+  useEffect(() => {
+    hasNodesRef.current = profile.nodes.length > 0;
+  }, [profile.nodes.length]);
 
   const refresh = useCallback(async () => {
     if (!connected) {
       setProfile(EMPTY_PROFILE);
+      setLoading(false);
       return;
     }
-    setLoading(true);
+    // setLoading(true);
+    // Soft refresh: keep current profile visible while switching nodes / polling.
+    if (!hasNodesRef.current) {
+      setLoading(true);
+    }
     setError(null);
     try {
       const snapshot = await fetchProfileSnapshot(selectedNode);
@@ -31,14 +46,20 @@ export function useNodeProfile(connected: boolean, selectedNode?: string) {
 
   useEffect(() => {
     void refresh();
-    if (!connected) {
+    // if (!connected) {
+    //   return undefined;
+    // }
+    // const timer = setInterval(() => {
+    //   void refresh();
+    // }, 3000);
+    if (!connected || paused) {
       return undefined;
     }
     const timer = setInterval(() => {
       void refresh();
     }, 3000);
     return () => clearInterval(timer);
-  }, [connected, refresh]);
+  }, [connected, refresh, paused]);
 
   return { profile, loading, error, refresh };
 }

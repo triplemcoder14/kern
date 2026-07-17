@@ -73,6 +73,7 @@ export interface KernelHotspot {
   function: string;
   share: number;
   meaning?: string;
+  category?: string;
 }
 
 export interface TimelineEvent {
@@ -112,12 +113,18 @@ export type ProfileStackFrameKind =
   | "endpoint"
   | "workload"
   | "service"
-  | "hop";
+  | "hop"
+  | "cpu"
+  | "user"
+  | "app"
+  | "runtime"
+  | "library"
+  | "kernel";
 
 export interface ProfileStackFrame {
   id?: string;
   label: string;
-  /** Secondary line: namespace, IP, or port detail */
+  /** Secondary line: namespace, IP, offset, or port detail */
   subtitle?: string;
   depth: number;
   width: number;
@@ -129,6 +136,8 @@ export interface ProfileStackFrame {
   namespace?: string;
   endpointKind?: string;
   ip?: string;
+  /** Mapped binary/object for CPU stack frames */
+  binary?: string;
   bytes?: number;
   retransmits?: number;
   latencyMs?: number;
@@ -238,6 +247,7 @@ export interface AgentProfilePayload {
     function: string;
     share: number;
     meaning?: string;
+    category?: string;
   }>;
   cpu_stack?: ProfileStackFrame[];
   stack_source?: ProfileStackSource;

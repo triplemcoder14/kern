@@ -21,8 +21,17 @@ var (
 
 type kallsymEntry struct {
 	addr uint64
+	// end exclusive — next symbol addr (or addr+maxSpan). Added so nearest-lower can't span holes.
+	end  uint64
 	name string
 }
+
+// type kallsymEntry struct {
+// 	addr uint64
+// 	name string
+// }
+
+const maxKallsymSpan = 512 * 1024 // reject nearest-lower hits farther than this
 
 func readProcessKernelStack(pid int, limit int) []string {
 	if pid <= 0 || limit <= 0 {
@@ -90,7 +99,17 @@ func lookupKallsym(addr uint64) string {
 	if i < 0 {
 		return ""
 	}
-	return kallsymsSorted[i].name
+	entry := kallsymsSorted[i]
+	// Reject unbounded nearest-lower matches (truncated tables / wrong module range).
+	// return kallsymsSorted[i].name
+	// if addr >= entry.end || addr-entry.addr > maxKallsymSpan {
+	if addr >= entry.end {
+		return ""
+	}
+	if addr-entry.addr > maxKallsymSpan {
+		return ""
+	}
+	return entry.name
 }
 
 func resolveStackAddrs(addrs []uint64) []string {
@@ -118,13 +137,23 @@ func loadKallsyms() {
 	}
 	defer file.Close()
 
+	// Load all text symbols — truncating mid-table caused wrong nearest-lower hits
+	// (e.g. display-driver symbols attributed to unrelated kernel IPs).
+	// const maxKallsyms = 49152
+	// entries := make([]kallsymEntry, 0, 32768)
 	entries := make([]kallsymEntry, 0, 65536)
 	scanner := bufio.NewScanner(file)
-	buf := make([]byte, 0, 1024*1024)
+	// buf := make([]byte, 0, 256*1024)
+	buf := make([]byte, 0, 256*1024)
 	scanner.Buffer(buf, 1024*1024)
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
 		if len(fields) < 3 {
+			continue
+		}
+		// Keep code symbols only — skips absolute/data noise that balloons RSS.
+		typ := fields[1]
+		if typ != "t" && typ != "T" && typ != "w" && typ != "W" {
 			continue
 		}
 		addr, err := strconv.ParseUint(fields[0], 16, 64)
@@ -132,9 +161,23 @@ func loadKallsyms() {
 			continue
 		}
 		entries = append(entries, kallsymEntry{addr: addr, name: fields[2]})
+		// if len(entries) >= maxKallsyms {
+		// 	break
+		// }
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].addr < entries[j].addr
 	})
+	for i := range entries {
+		if i+1 < len(entries) {
+			entries[i].end = entries[i+1].addr
+		} else {
+			entries[i].end = entries[i].addr + maxKallsymSpan
+		}
+		// Clamp absurd gaps so a hit in a huge hole doesn't stick to the previous symbol.
+		if entries[i].end > entries[i].addr+maxKallsymSpan {
+			entries[i].end = entries[i].addr + maxKallsymSpan
+		}
+	}
 	kallsymsSorted = entries
 }

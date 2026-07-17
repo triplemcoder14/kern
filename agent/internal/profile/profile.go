@@ -25,6 +25,7 @@ type StackFrame struct {
 	LatencyMs    uint32  `json:"latencyMs,omitempty"`
 	SharePct     int     `json:"sharePct,omitempty"`
 	Samples      int     `json:"samples,omitempty"`
+	Binary       string  `json:"binary,omitempty"`
 	Path         string  `json:"path,omitempty"`
 	FlowCount    int     `json:"flowCount,omitempty"`
 }
@@ -116,6 +117,7 @@ type KernelHotspot struct {
 	Function string  `json:"function"`
 	Share    float64 `json:"share"`
 	Meaning  string  `json:"meaning,omitempty"`
+	Category string  `json:"category,omitempty"`
 }
 
 type TimelineEvent struct {
