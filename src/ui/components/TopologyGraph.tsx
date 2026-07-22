@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type WheelEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   GRAPH_LOD_ORDER,
   lodFromZoom,
@@ -324,47 +324,84 @@ export function TopologyGraph({
     const observer = new ResizeObserver(() => fitToView());
     observer.observe(viewport);
     return () => observer.disconnect();
-  }, [fitToView]);
+  }, [fitToView, layout.nodes.length]);
 
-  const handleWheel = (event: WheelEvent<HTMLDivElement>) => {
-    const target = event.target as HTMLElement | null;
-    // Inspect / chrome scroll must not zoom or pan the map underneath.
-    if (
-      target?.closest(".graph-inspect") ||
-      target?.closest(".graph-edge-card") ||
-      target?.closest(".graph-lod-bar") ||
-      target?.closest(".graph-controls")
-    ) {
-      return;
+  // Attach whenever the viewport exists. (Earlier: deps were only onLodChange, so if the
+  // first paint was the empty state the listener never attached after nodes appeared.)
+  useLayoutEffect(() => {
+    if (layout.nodes.length === 0) {
+      return undefined;
     }
-    event.preventDefault();
     const viewport = viewportRef.current;
     if (!viewport) {
-      return;
+      return undefined;
     }
-    const rect = viewport.getBoundingClientRect();
-    const cursorX = event.clientX - rect.left;
-    const cursorY = event.clientY - rect.top;
-    const factor = event.deltaY > 0 ? 0.9 : 1.1;
-    setZoom((current) => {
-      const next = Math.min(3, Math.max(0.25, current * factor));
-      setPan((currentPan) => ({
-        x: cursorX - ((cursorX - currentPan.x) / current) * next,
-        y: cursorY - ((cursorY - currentPan.y) / current) * next,
-      }));
-      if (autoLodRef.current && onLodChange) {
-        const suggested = lodFromZoom(next);
-        if (suggested !== lastAutoLodRef.current) {
-          lastAutoLodRef.current = suggested;
-          onLodChange(suggested);
-        }
+
+    const onWheelNative = (event: globalThis.WheelEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (
+        target?.closest(".graph-inspect") ||
+        target?.closest(".graph-edge-card") ||
+        target?.closest(".graph-lod-bar") ||
+        target?.closest(".graph-controls")
+      ) {
+        return;
       }
-      return next;
-    });
-  };
+      event.preventDefault();
+      event.stopPropagation();
+
+      // Pinch-to-zoom is ctrl/meta + wheel. Plain two-finger trackpad drag is pan.
+      // Prefer pan when there is any meaningful horizontal delta (trackpad pan).
+      const absX = Math.abs(event.deltaX);
+      const absY = Math.abs(event.deltaY);
+      const pinchZoom = (event.ctrlKey || event.metaKey) && absY >= absX;
+      if (!pinchZoom) {
+        const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 40 : 1;
+        setPan((currentPan) => ({
+          x: currentPan.x - event.deltaX * scale,
+          y: currentPan.y - event.deltaY * scale,
+        }));
+        return;
+      }
+
+      const rect = viewport.getBoundingClientRect();
+      const cursorX = event.clientX - rect.left;
+      const cursorY = event.clientY - rect.top;
+      const factor = Math.exp(-event.deltaY * 0.01);
+      setZoom((current) => {
+        const next = Math.min(3, Math.max(0.25, current * factor));
+        setPan((currentPan) => ({
+          x: cursorX - ((cursorX - currentPan.x) / current) * next,
+          y: cursorY - ((cursorY - currentPan.y) / current) * next,
+        }));
+        if (autoLodRef.current && onLodChange) {
+          const suggested = lodFromZoom(next);
+          if (suggested !== lastAutoLodRef.current) {
+            lastAutoLodRef.current = suggested;
+            onLodChange(suggested);
+          }
+        }
+        return next;
+      });
+    };
+
+    viewport.addEventListener("wheel", onWheelNative, { passive: false });
+    return () => viewport.removeEventListener("wheel", onWheelNative);
+  }, [layout.nodes.length, onLodChange]);
+
+  // Previous: React onWheel treated every trackpad scroll as zoom (graph flies away).
+  // const handleWheel = (event: WheelEvent<HTMLDivElement>) => { ... };
+
+  const panRef = useRef(pan);
+  panRef.current = pan;
 
   const startPan = (clientX: number, clientY: number) => {
-    dragRef.current = { x: clientX, y: clientY, panX: pan.x, panY: pan.y };
+    dragRef.current = {
+      x: clientX,
+      y: clientY,
+      panX: panRef.current.x,
+      panY: panRef.current.y,
+    };
   };
 
   useEffect(() => {
@@ -386,7 +423,7 @@ export function TopologyGraph({
       window.removeEventListener("mousemove", handleMove);
       window.removeEventListener("mouseup", handleUp);
     };
-  }, [pan.x, pan.y]);
+  }, []);
 
   const toggleExpand = (nodeId: string) => {
     setExpandedNodeIds((current) => {
@@ -414,7 +451,6 @@ export function TopologyGraph({
     <div
       ref={viewportRef}
       className={`graph-viewport ${linkedNodeIds ? "has-focus" : ""} ${investigating ? "investigating" : ""}`}
-      onWheel={handleWheel}
       onMouseDown={(event) => {
         if (event.button !== 0) {
           return;

@@ -26,7 +26,7 @@ Starts both local tunnels for the KERN console:
   - agent port-forward     → http://127.0.0.1:${AGENT_PORT}
 
 Uses the current kubectl context. Ctrl+C stops both.
-Agent forwards auto-restart if the pod drops (common with hostNetwork agents).
+# Agent forwards auto-restart if the pod drops (common with hostNetwork agents).
 
 Env overrides:
   KERN_K8S_PROXY_PORT   (default ${KUBECTL_PROXY_PORT})

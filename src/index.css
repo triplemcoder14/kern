@@ -2384,6 +2384,9 @@ input {
   min-height: 360px;
   position: relative;
   overflow: hidden;
+  /* Let our wheel/pan handlers own gestures; don't let the browser scroll the page. */
+  touch-action: none;
+  overscroll-behavior: none;
   cursor: grab;
   background:
     linear-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 1px),
