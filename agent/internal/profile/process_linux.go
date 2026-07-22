@@ -239,38 +239,65 @@ func (c *platformCollector) resolvePodFromPID(pid int) (namespace, pod string) {
 }
 
 func podUIDCandidates(line string) []string {
-	idx := strings.Index(line, "pod")
-	if idx < 0 {
-		return nil
-	}
-	rest := line[idx+3:]
-	rest = strings.TrimPrefix(rest, "-")
-	rest = strings.TrimPrefix(rest, "/")
-	rest = strings.TrimPrefix(rest, "_")
+	// idx := strings.Index(line, "pod")
+	// if idx < 0 {
+	// 	return nil
+	// }
+	// rest := line[idx+3:]
+	// ... matched "pod" inside "kubepods"; skip that prefix instead.
 
-	var token strings.Builder
-	for _, ch := range rest {
-		// containerd encodes pod UIDs with underscores instead of dashes.
-		if (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F') || ch == '-' || ch == '_' {
-			token.WriteRune(ch)
+	var out []string
+	seen := map[string]struct{}{}
+	for i := 0; i < len(line); {
+		rel := strings.Index(line[i:], "pod")
+		if rel < 0 {
+			break
+		}
+		abs := i + rel
+		// Skip the "pod" substring inside "kubepods".
+		if abs >= 4 && strings.EqualFold(line[abs-4:abs], "kube") {
+			i = abs + 3
 			continue
 		}
-		break
-	}
+		rest := line[abs+3:]
+		rest = strings.TrimPrefix(rest, "-")
+		rest = strings.TrimPrefix(rest, "/")
+		rest = strings.TrimPrefix(rest, "_")
 
-	raw := strings.Trim(token.String(), "-_")
-	raw = strings.ReplaceAll(raw, "_", "-")
-	compact := strings.ReplaceAll(raw, "-", "")
-	if len(compact) < 32 {
-		return nil
-	}
-	if len(compact) > 32 {
-		compact = compact[:32]
-	}
+		var token strings.Builder
+		for _, ch := range rest {
+			// containerd encodes pod UIDs with underscores instead of dashes.
+			if (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F') || ch == '-' || ch == '_' {
+				token.WriteRune(ch)
+				continue
+			}
+			break
+		}
 
-	formatted := formatPodUID(compact)
-	candidates := []string{formatted, compact, strings.ReplaceAll(formatted, "-", "_")}
-	return candidates
+		raw := strings.Trim(token.String(), "-_")
+		raw = strings.ReplaceAll(raw, "_", "-")
+		compact := strings.ReplaceAll(raw, "-", "")
+		i = abs + 3
+		if len(compact) < 32 {
+			continue
+		}
+		if len(compact) > 32 {
+			compact = compact[:32]
+		}
+
+		formatted := formatPodUID(compact)
+		for _, candidate := range []string{formatted, compact, strings.ReplaceAll(formatted, "-", "_")} {
+			if candidate == "" {
+				continue
+			}
+			if _, ok := seen[candidate]; ok {
+				continue
+			}
+			seen[candidate] = struct{}{}
+			out = append(out, candidate)
+		}
+	}
+	return out
 }
 
 func formatPodUID(raw string) string {

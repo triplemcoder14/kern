@@ -12,6 +12,7 @@ import {
   type LatencyHistogram,
 } from "./latency";
 import type { ProtocolClass } from "./protocol-class";
+import { resolveProtocolClass } from "./protocol-class";
 import { buildInvestigationLayout } from "./graph-investigation";
 
 export type GraphNodeKind = "Pod" | "Service" | "Workload" | "Namespace";
@@ -185,17 +186,19 @@ function endpointNodeId(endpoint: NetworkEndpoint): string | null {
 }
 
 function flowLatency(flow: NetworkFlow): number | undefined {
-  if (flow.latencyMs !== undefined) {
+  // Only real measurements — never invent latency from flow id hashes.
+  if (flow.latencyMs !== undefined && flow.latencyMs >= 0) {
     return flow.latencyMs;
   }
-  if (flow.source !== "ebpf") {
-    return undefined;
-  }
-  let hash = 0;
-  for (let i = 0; i < flow.id.length; i += 1) {
-    hash = (hash * 31 + flow.id.charCodeAt(i)) | 0;
-  }
-  return (Math.abs(hash) % 90) + 4;
+  return undefined;
+  // if (flow.source !== "ebpf") {
+  //   return undefined;
+  // }
+  // let hash = 0;
+  // for (let i = 0; i < flow.id.length; i += 1) {
+  //   hash = (hash * 31 + flow.id.charCodeAt(i)) | 0;
+  // }
+  // return (Math.abs(hash) % 90) + 4;
 }
 
 function worstVerdict(current: FlowVerdict, next: FlowVerdict): FlowVerdict {
@@ -214,11 +217,22 @@ function edgeHealth(
   p95?: number,
   retransmits = 0,
   drops = 0,
+  appClass: ProtocolClass = "tcp",
 ): GraphEdgeHealth {
   if (verdict === "DROPPED" || verdict === "TIMEOUT" || drops > 0) {
     return "bad";
   }
-  if (verdict === "RETRY" || retransmits > 0 || (p95 !== undefined && p95 > 80)) {
+  // Latency "slow" thresholds are protocol-aware. A flat 80ms marked healthy
+  // DNS (often ~50–100ms to CoreDNS) as warn and made the map look alarming.
+  const slowP95Ms =
+    appClass === "dns"
+      ? 250
+      : appClass === "http" || appClass === "grpc"
+        ? 200
+        : appClass === "postgres" || appClass === "mysql" || appClass === "redis"
+          ? 100
+          : 150;
+  if (verdict === "RETRY" || retransmits > 0 || (p95 !== undefined && p95 > slowP95Ms)) {
     return "warn";
   }
   return "ok";
@@ -597,7 +611,13 @@ function buildServiceGraphLayout(
     const histogram = buildLatencyHistogram(agg.latencies);
     const trafficSeries = buildTrafficSeries(agg.timestamps);
     const requestsPerSec = Number((agg.flowCount / WINDOW_SECONDS).toFixed(1));
-    const health = edgeHealth(agg.verdict, stats?.p95Ms, agg.retransmits, agg.drops);
+    const health = edgeHealth(
+      agg.verdict,
+      stats?.p95Ms,
+      agg.retransmits,
+      agg.drops,
+      resolveProtocolClass({ port: agg.port, protocol: agg.protocol }),
+    );
     const latencyLabel =
       stats?.p95Ms !== undefined ? `p95 ${stats.p95Ms}ms` : agg.flowCount > 0 ? "live" : "idle";
 
@@ -835,7 +855,13 @@ export function buildFullGraphLayout(
     const histogram = buildLatencyHistogram(agg.latencies);
     const trafficSeries = buildTrafficSeries(agg.timestamps);
     const latencyLabel = stats ? `${stats.p50Ms}ms` : agg.flowCount > 0 ? "live" : "0ms";
-    const health = edgeHealth(agg.verdict, stats?.p95Ms, agg.retransmits, agg.drops);
+    const health = edgeHealth(
+      agg.verdict,
+      stats?.p95Ms,
+      agg.retransmits,
+      agg.drops,
+      resolveProtocolClass({ port: agg.port, protocol: agg.protocol }),
+    );
 
     edges.push({
       id: agg.id,

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   buildOverviewStats,
   buildPathRows,
@@ -10,7 +10,20 @@ import {
 import { buildGraphLayout, type GraphEdgeLayout, type GraphLod } from "../../../core/network/graph-model";
 import { protocolClassLabel } from "../../../core/network/protocol-class";
 import { filterNetworkSnapshot } from "../../../core/network/scope";
+import {
+  filterSnapshotForInvestigation,
+} from "../../../core/network/investigation-scope";
 import type { NetworkFlow, NetworkSnapshot } from "../../../core/types/network";
+import { useInvestigationLayout } from "../../hooks/useInvestigationLayout";
+import { useFrozenWhileSelected, useStickyById } from "../../hooks/useStickySelection";
+import { useInvestigationHistoryFlows } from "../../hooks/useInvestigationHistoryFlows";
+import type { InvestigationFocus, StartInvestigation } from "../../investigation/types";
+import {
+  investigationLabel,
+  investigationWindowLabel,
+  investigationWindowMs,
+} from "../../investigation/types";
+import type { NavId, NavPage } from "../AppShell";
 import { EdgeLatencyBoard } from "../EdgeLatencyBoard";
 import { FlowDetailPanel } from "../FlowDetailPanel";
 import { LiveFlowsTable } from "../LiveFlowsTable";
@@ -36,6 +49,9 @@ interface NetworkWorkspaceProps {
   namespaces: string[];
   onNamespaceChange: (value: string) => void;
   initialTab?: NetworkWorkspaceTab;
+  investigation?: InvestigationFocus | null;
+  onStartInvestigation?: StartInvestigation;
+  onNavigate?: (nav: NavId, page: NavPage) => void;
 }
 
 const TABS: Array<{ id: NetworkWorkspaceTab; label: string; ready: boolean }> = [
@@ -349,7 +365,8 @@ function FlowsTab({
   const [protocol, setProtocol] = useState("all");
   const [status, setStatus] = useState("all");
 
-  const rows = useMemo(() => buildPathRows(flows), [flows]);
+  const liveRows = useMemo(() => buildPathRows(flows), [flows]);
+  const rows = useFrozenWhileSelected(liveRows, selectedPathId != null);
   const filtered = useMemo(() => {
     const query = search.trim().toLowerCase();
     return rows.filter((row) => {
@@ -365,7 +382,7 @@ function FlowsTab({
     });
   }, [rows, search, protocol, status]);
 
-  const selected = filtered.find((row) => row.id === selectedPathId) ?? null;
+  const selected = useStickyById(rows, selectedPathId);
 
   return (
     <div className="network-ws-flows">
@@ -474,6 +491,9 @@ export function NetworkWorkspace({
   namespaces,
   onNamespaceChange,
   initialTab = "overview",
+  investigation = null,
+  onStartInvestigation,
+  onNavigate,
 }: NetworkWorkspaceProps) {
   const [tab, setTab] = useState<NetworkWorkspaceTab>(initialTab);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
@@ -485,26 +505,83 @@ export function NetworkWorkspace({
     setTab(initialTab);
   }, [initialTab]);
 
-  const scoped = useMemo(() => filterNetworkSnapshot(snapshot, namespace), [snapshot, namespace]);
-  const layout = useMemo(
+  // const scoped = useMemo(() => filterNetworkSnapshot(snapshot, namespace), [snapshot, namespace]);
+  const namespaceScoped = useMemo(
+    () => filterNetworkSnapshot(snapshot, namespace),
+    [snapshot, namespace],
+  );
+  const investigationFocus = useMemo(
+    () =>
+      investigation
+        ? {
+            name: investigation.name,
+            namespace: investigation.namespace,
+            memberPods: investigation.memberPods,
+            windowMs: investigationWindowMs(investigation.window),
+          }
+        : null,
+    [investigation],
+  );
+  // Live snapshot scoped to service + time window (hybrid baseline before history merge).
+  const liveScoped = useMemo(
+    () => filterSnapshotForInvestigation(namespaceScoped, investigationFocus ?? undefined),
+    [namespaceScoped, investigationFocus],
+  );
+  const { flows: investigationFlows, historyLoading } = useInvestigationHistoryFlows(
+    investigation,
+    namespaceScoped.flows,
+  );
+  // When investigating, tabs use retained history ∪ live; map topology still uses liveScoped nodes.
+  // const scoped = liveScoped;
+  const scoped = useMemo(() => {
+    if (!investigation) {
+      return namespaceScoped;
+    }
+    return {
+      ...liveScoped,
+      flows: investigationFlows,
+    };
+  }, [investigation, namespaceScoped, liveScoped, investigationFlows]);
+  const liveLayout = useMemo(
     () => buildGraphLayout(scoped.topology, scoped.flows, { lod }),
     [scoped.topology, scoped.flows, lod],
   );
+  const investigating = selectedNodeId != null || selectedEdgeId != null;
+  const layout = useInvestigationLayout(liveLayout, investigating, lod);
+  // Freeze flow samples while investigating so detail panels don't empty on each tick.
+  const detailFlows = useFrozenWhileSelected(scoped.flows, investigating);
 
+  // Sticky edge object — survive ID churn if freeze refreshes (e.g. LOD change).
+  const selectedEdgeLive =
+    layout.edges.find((edge) => edge.id === selectedEdgeId) ?? null;
+  const stickyEdgeRef = useRef<GraphEdgeLayout | null>(null);
+  if (selectedEdgeId == null) {
+    stickyEdgeRef.current = null;
+  } else if (selectedEdgeLive) {
+    stickyEdgeRef.current = selectedEdgeLive;
+  }
   const selectedEdge =
-    layout.edges.find((edge) => edge.id === selectedEdgeId) ??
-    layout.edges.find((edge) => edge.flowCount > 0) ??
-    null;
+    selectedEdgeId == null
+      ? null
+      : selectedEdgeLive ??
+        (stickyEdgeRef.current?.id === selectedEdgeId ? stickyEdgeRef.current : null);
+
   const nodeById = useMemo(
     () => new Map(layout.nodes.map((node) => [node.id, node])),
     [layout.nodes],
   );
 
+  const pageSubtitle = investigation
+    ? `Investigating ${investigationLabel(investigation)} — ${investigationWindowLabel(investigation.window)}${investigation.live ? " + Live" : ""}${historyLoading ? " · loading retained…" : ""}`
+    : "Who talks, how long it takes, and where it fails — cluster → service → flow";
+
   return (
     <div className="network-ws-page">
       <PageHeader
-        title="Network"
-        subtitle="Who talks, how long it takes, and where it fails — cluster → service → flow"
+        // title="Network"
+        title={investigation ? `Network · ${investigationLabel(investigation)}` : "Network"}
+        // subtitle="Who talks, how long it takes, and where it fails — cluster → service → flow"
+        subtitle={pageSubtitle}
         clusterName={clusterName}
         namespace={namespace}
         namespaces={namespaces}
@@ -561,25 +638,29 @@ export function NetworkWorkspace({
               <TopologyGraph
                 layout={layout}
                 connected={connected}
-                selectedEdgeId={selectedEdge?.id ?? null}
+                selectedEdgeId={selectedEdgeId}
                 onSelectEdge={setSelectedEdgeId}
                 selectedNodeId={selectedNodeId}
                 onSelectNode={setSelectedNodeId}
                 lod={lod}
                 onLodChange={setLod}
-                showInspectPanel={false}
+                // showInspectPanel={false}
+                showInspectPanel
+                onNavigate={onNavigate}
+                onStartInvestigation={onStartInvestigation}
+                startedFrom="Service Map"
               />
             </section>
             <FlowDetailPanel
               edge={selectedEdge}
-              flows={scoped.flows}
+              flows={detailFlows}
               edges={layout.edges}
               nodeById={nodeById}
               onSelectEdge={setSelectedEdgeId}
             />
           </div>
           <LiveFlowsTable
-            flows={scoped.flows}
+            flows={detailFlows}
             limit={8}
             title="RECENT FLOWS ON MAP"
           />
@@ -594,11 +675,15 @@ export function NetworkWorkspace({
         />
       ) : null}
 
-      {tab === "dns" ? <DnsTab flows={scoped.flows} /> : null}
+      {tab === "dns" ? (
+        <DnsTab flows={scoped.flows} investigation={investigation} />
+      ) : null}
 
       {tab === "protocols" ? <ProtocolsTab flows={scoped.flows} /> : null}
 
-      {tab === "tcp" ? <TcpHealthTab flows={scoped.flows} /> : null}
+      {tab === "tcp" ? (
+        <TcpHealthTab flows={scoped.flows} investigation={investigation} />
+      ) : null}
     </div>
   );
 }

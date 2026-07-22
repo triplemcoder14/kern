@@ -5,6 +5,7 @@ import {
 } from "../../../core/network/investigation-insights";
 import { protocolClassLabel, type ProtocolClass } from "../../../core/network/protocol-class";
 import type { NetworkFlow } from "../../../core/types/network";
+import { useFrozenWhileSelected, useStickyById } from "../../hooks/useStickySelection";
 
 function formatMs(value?: number): string {
   return value === undefined ? "—" : `${Math.round(value)}ms`;
@@ -25,8 +26,9 @@ export function ProtocolsTab({ flows }: { flows: NetworkFlow[] }) {
   const [filter, setFilter] = useState<ProtocolFilter>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  const rows = useMemo(() => buildProtocolRows(flows, filter), [flows, filter]);
-  const selected = rows.find((row) => row.id === selectedId) ?? null;
+  const liveRows = useMemo(() => buildProtocolRows(flows, filter), [flows, filter]);
+  const rows = useFrozenWhileSelected(liveRows, selectedId != null);
+  const selected = useStickyById(rows, selectedId);
 
   return (
     <div className="network-ws-overview">
@@ -43,7 +45,10 @@ export function ProtocolsTab({ flows }: { flows: NetworkFlow[] }) {
         <button
           type="button"
           className={`network-ws-chip${filter === "all" ? " network-ws-chip-active" : ""}`}
-          onClick={() => setFilter("all")}
+          onClick={() => {
+            setFilter("all");
+            setSelectedId(null);
+          }}
         >
           All
           <span>{flows.length}</span>
@@ -53,7 +58,10 @@ export function ProtocolsTab({ flows }: { flows: NetworkFlow[] }) {
             key={group.id}
             type="button"
             className={`network-ws-chip${filter === group.id ? " network-ws-chip-active" : ""}`}
-            onClick={() => setFilter(group.id)}
+            onClick={() => {
+              setFilter(group.id);
+              setSelectedId(null);
+            }}
           >
             {protocolClassLabel(group.id)}
             <span>{group.flowCount}</span>

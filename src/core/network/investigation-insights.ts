@@ -362,7 +362,7 @@ export function buildDnsRows(flows: NetworkFlow[]): DnsFlowRow[] {
     .filter(isDnsFlow)
     .slice()
     .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-    .map((flow) => {
+    .map((flow, index) => {
       const decoded = Boolean(flow.dnsQuery || flow.dnsRcode || flow.dnsTxid);
       const responseCode = dnsResponseCode(flow);
       const query = flow.dnsQuery || "—";
@@ -371,7 +371,7 @@ export function buildDnsRows(flows: NetworkFlow[]): DnsFlowRow[] {
       const source = flow.src.name || flow.src.ip || "—";
       const server = flow.dst.name || flow.dst.ip || "—";
       return {
-        id: flow.id,
+        id: `${flow.id}#${flow.timestamp}#${index}`,
         timestamp: flow.timestamp,
         source,
         sourceNamespace: flow.src.namespace,
@@ -458,8 +458,8 @@ export function buildProtocolRows(
     .filter((flow) => appClass === "all" || resolveProtocolClass(flow) === appClass)
     .slice()
     .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-    .map((flow) => ({
-      id: flow.id,
+    .map((flow, index) => ({
+      id: `${flow.id}#${flow.timestamp}#${index}`,
       timestamp: flow.timestamp,
       source: flow.src.name,
       sourceNamespace: flow.src.namespace,
@@ -506,8 +506,8 @@ export function buildTcpEventRows(flows: NetworkFlow[], problemOnly = true): Tcp
     .filter((flow) => (problemOnly ? isFailed(flow.verdict) || (flow.retransmits ?? 0) > 0 : true))
     .slice()
     .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-    .map((flow) => ({
-      id: flow.id,
+    .map((flow, index) => ({
+      id: `${flow.id}#${flow.timestamp}#${index}`,
       timestamp: flow.timestamp,
       source: flow.src.name,
       sourceNamespace: flow.src.namespace,

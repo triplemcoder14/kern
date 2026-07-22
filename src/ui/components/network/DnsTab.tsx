@@ -1,6 +1,12 @@
 import { useMemo, useState } from "react";
 import { buildDnsRows, buildDnsSummary } from "../../../core/network/investigation-insights";
 import type { NetworkFlow } from "../../../core/types/network";
+import { useFrozenWhileSelected, useStickyById } from "../../hooks/useStickySelection";
+import type { InvestigationFocus } from "../../investigation/types";
+import {
+  investigationLabel,
+  investigationWindowLabel,
+} from "../../investigation/types";
 
 function formatMs(value?: number): string {
   return value === undefined ? "—" : `${Math.round(value)}ms`;
@@ -21,12 +27,26 @@ function formatTxid(value?: number): string {
   return `0x${value.toString(16).padStart(4, "0")}`;
 }
 
-export function DnsTab({ flows }: { flows: NetworkFlow[] }) {
+export function DnsTab({
+  flows,
+  investigation = null,
+}: {
+  flows: NetworkFlow[];
+  investigation?: InvestigationFocus | null;
+}) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const summary = useMemo(() => buildDnsSummary(flows), [flows]);
-  const rows = useMemo(() => buildDnsRows(flows), [flows]);
-  const selected = rows.find((row) => row.id === selectedId) ?? null;
+  const liveRows = useMemo(() => buildDnsRows(flows), [flows]);
+  const rows = useFrozenWhileSelected(liveRows, selectedId != null);
+  const selected = useStickyById(rows, selectedId);
   const nxdomainCount = rows.filter((row) => row.responseCode === "NXDOMAIN").length;
+  const focusLabel = investigation ? investigationLabel(investigation) : null;
+  const windowLabel = investigation
+    ? investigationWindowLabel(investigation.window)
+    : "this window";
+  const emptyLookups = focusLabel
+    ? `No DNS activity involving ${focusLabel} was observed in the ${windowLabel.toLowerCase()}. KERN is listening for new lookups.`
+    : "No DNS lookups in this window.";
 
   const cards = [
     { label: "Queries/sec", value: String(summary.queriesPerSec) },
@@ -50,7 +70,11 @@ export function DnsTab({ flows }: { flows: NetworkFlow[] }) {
         <section className="panel">
           <div className="panel-header">TOP DNS SERVERS</div>
           {summary.topServers.length === 0 ? (
-            <div className="empty-state">No DNS traffic in this window.</div>
+            <div className="empty-state">
+              {focusLabel
+                ? `No DNS servers contacted by ${focusLabel} in the ${windowLabel.toLowerCase()}.`
+                : "No DNS traffic in this window."}
+            </div>
           ) : (
             <ul className="network-ws-list">
               {summary.topServers.map((item) => (
@@ -70,7 +94,11 @@ export function DnsTab({ flows }: { flows: NetworkFlow[] }) {
         <section className="panel">
           <div className="panel-header">TOP CLIENT PODS</div>
           {summary.topClients.length === 0 ? (
-            <div className="empty-state">No DNS clients observed.</div>
+            <div className="empty-state">
+              {focusLabel
+                ? `No DNS clients for ${focusLabel} in the ${windowLabel.toLowerCase()}.`
+                : "No DNS clients observed."}
+            </div>
           ) : (
             <ul className="network-ws-list">
               {summary.topClients.map((item) => (
@@ -94,7 +122,10 @@ export function DnsTab({ flows }: { flows: NetworkFlow[] }) {
           <div className="panel-header">DNS LOOKUPS</div>
           <div className="network-ws-table-wrap">
             {rows.length === 0 ? (
-              <div className="empty-state">No DNS lookups in this window.</div>
+              <div className="empty-state">
+                {/* Previous: "No DNS lookups in this window." */}
+                {emptyLookups}
+              </div>
             ) : (
               <table className="network-ws-path-table">
                 <thead>

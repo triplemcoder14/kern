@@ -6,15 +6,22 @@ import { isAlertSoundMuted, setAlertSoundMuted, unlockAlertSound } from "../lib/
 import { friendlyMonitorError } from "../lib/friendly-errors";
 import { AppShell, type NavId, type NavPage } from "../components/AppShell";
 import { AlertsDashboard } from "../components/AlertsDashboard";
+import { InvestigationBanner } from "../components/InvestigationBanner";
 import { LiveEventStream } from "../components/LiveEventStream";
 import { NetworkWorkspace, type NetworkWorkspaceTab } from "../components/network/NetworkWorkspace";
 import { OverviewDashboard } from "../components/OverviewDashboard";
+import { PageErrorBoundary } from "../components/PageErrorBoundary";
 import { ProfilingDashboard } from "../components/ProfilingDashboard";
 import { SettingsView } from "../components/SettingsView";
 import { WorkloadsDashboard } from "../components/WorkloadsDashboard";
 import { useAuth } from "../hooks/useAuth";
 import { useMonitor } from "../hooks/useMonitor";
 import { useNetworkTalkAlertSound } from "../hooks/useNetworkTalkAlertSound";
+import type { InvestigationFocus, StartInvestigation } from "../investigation/types";
+import { DEFAULT_INVESTIGATION_WINDOW } from "../investigation/types";
+import { resolveInvestigationNode } from "../investigation/resolve-node";
+import { fetchProfileSnapshot, prefetchProfileSnapshot, readCachedProfile } from "../../lib/profile-api";
+// import { investigationLabel } from "../investigation/types";
 
 function networkTabForPage(page: NavPage): NetworkWorkspaceTab {
   if (page === "topology" || page === "network-map") {
@@ -44,6 +51,10 @@ export function ConsoleApp() {
   const [namespace, setNamespace] = useState(ALL_NAMESPACES);
   const [paused, setPaused] = useState(false);
   const [soundMuted, setSoundMuted] = useState(isAlertSoundMuted);
+  const [investigation, setInvestigation] = useState<InvestigationFocus | null>(null);
+  const [profilerTab, setProfilerTab] = useState<"overview" | "cpu" | "memory" | "network" | "timeline">(
+    "overview",
+  );
 
   useNetworkTalkAlertSound(monitor.events, soundMuted, monitor.health.connected);
 
@@ -78,7 +89,19 @@ export function ConsoleApp() {
     onNavigate: (nextPage) => handleNavigate(nextPage, nextPage),
   });
 
-  const handleNavigate = (nav: NavId, nextPage: NavPage) => {
+  const handleNavigate = (
+    nav: NavId,
+    nextPage: NavPage,
+    options?: { keepInvestigation?: boolean },
+  ) => {
+    // Leaving via the shell (Workloads, Network, Overview, …) ends the investigation.
+    // Investigate* actions pass keepInvestigation so DNS → TCP → CPU stays scoped.
+    // if (investigation) { setInvestigation(null); } // was: always clear — broke cross-page investigate
+    if (investigation && !options?.keepInvestigation) {
+      setInvestigation(null);
+      setProfilerTab("overview");
+    }
+
     if (
       nextPage === "topology" ||
       nextPage === "flows" ||
@@ -96,6 +119,124 @@ export function ConsoleApp() {
     }
     setActiveNav(nav);
     setPage(nextPage);
+  };
+
+  const startInvestigation: StartInvestigation = (focusInput, dest) => {
+    const next: InvestigationFocus = {
+      kind: focusInput.kind,
+      name: focusInput.name,
+      namespace: focusInput.namespace,
+      memberPods: focusInput.memberPods,
+      nodeName: focusInput.nodeName,
+      level: focusInput.level,
+      pod: focusInput.pod,
+      pid: focusInput.pid,
+      processName: focusInput.processName,
+      clusterName: focusInput.clusterName ?? clusterName,
+      startedFrom: focusInput.startedFrom,
+      startedAt: Date.now(),
+      // Data window is independent of startedAt — "just now" ≠ empty history.
+      window: focusInput.window ?? DEFAULT_INVESTIGATION_WINDOW,
+      live: focusInput.live ?? true,
+    };
+
+    const finish = (focus: InvestigationFocus) => {
+      setInvestigation(focus);
+      // Scope global namespace so Network / Profiler / Events inherit the same world.
+      if (focus.namespace && focus.namespace !== ALL_NAMESPACES) {
+        handleNamespaceChange(focus.namespace);
+      }
+      if (dest) {
+        // Investigate CPU should open the CPU flame tab, not Overview.
+        if (dest.page === "profiling" || dest.nav === "profiling") {
+          setProfilerTab("cpu");
+        }
+        handleNavigate(dest.nav, dest.page, { keepInvestigation: true });
+      }
+    };
+
+    const isCpuInvestigate =
+      dest?.page === "profiling" || dest?.nav === "profiling";
+
+    const openWithNode = (focus: InvestigationFocus) => {
+      if (focus.nodeName && isCpuInvestigate) {
+        // Share this in-flight request with useNodeProfile after navigation.
+        void prefetchProfileSnapshot(focus.nodeName).catch(() => undefined);
+      }
+      // Always navigate immediately — never leave the UI waiting on a black screen.
+      // Previous: Promise.race delay before finish() made the app feel frozen / blank.
+      finish(focus);
+    };
+
+    // Prefer a sync cache hit so Investigate CPU opens on the right node with data ready.
+    const cachedNode =
+      next.nodeName ??
+      resolveInvestigationNode(
+        next,
+        readCachedProfile()?.podPlacements,
+        readCachedProfile()?.nodes,
+      );
+
+    if (cachedNode) {
+      openWithNode({ ...next, nodeName: cachedNode });
+      return;
+    }
+
+    if (next.nodeName) {
+      openWithNode(next);
+      return;
+    }
+
+    // No cache — resolve placement first for CPU so Profiler never mounts without a node
+    // (that was the blank main panel). Other destinations can open immediately.
+    if (isCpuInvestigate) {
+      void fetchProfileSnapshot()
+        .then(async (snapshot) => {
+          const nodeName = resolveInvestigationNode(
+            next,
+            snapshot.podPlacements,
+            snapshot.nodes,
+          );
+          const focus = nodeName ? { ...next, nodeName } : next;
+          if (nodeName) {
+            // Start warm; don't block forever — join the same promise in the Profiler hook.
+            void prefetchProfileSnapshot(nodeName);
+          }
+          openWithNode(focus);
+        })
+        .catch(() => {
+          openWithNode(next);
+        });
+      return;
+    }
+
+    openWithNode(next);
+    void fetchProfileSnapshot()
+      .then((snapshot) => {
+        const nodeName = resolveInvestigationNode(
+          next,
+          snapshot.podPlacements,
+          snapshot.nodes,
+        );
+        if (!nodeName) {
+          return;
+        }
+        setInvestigation((prev) =>
+          prev && prev.startedAt === next.startedAt ? { ...prev, nodeName } : prev,
+        );
+      })
+      .catch(() => {
+        // Non-CPU investigate can proceed without a resolved node.
+      });
+  };
+
+  const exitInvestigation = () => {
+    setInvestigation(null);
+    setProfilerTab("overview");
+  };
+
+  const handleInvestigationChange = (focus: InvestigationFocus) => {
+    setInvestigation(focus);
   };
 
   const handleLogout = async () => {
@@ -148,6 +289,10 @@ export function ConsoleApp() {
         )
       }
     >
+      {investigation ? (
+        <InvestigationBanner focus={investigation} onExit={exitInvestigation} />
+      ) : null}
+
       {page === "overview" && (
         <OverviewDashboard
           health={monitor.health}
@@ -155,6 +300,7 @@ export function ConsoleApp() {
           events={monitor.events}
           openIncidents={monitor.openIncidents}
           onNavigate={handleNavigate}
+          onStartInvestigation={startInvestigation}
           {...clusterPageProps}
         />
       )}
@@ -163,6 +309,9 @@ export function ConsoleApp() {
         <NetworkWorkspace
           snapshot={monitor.network}
           initialTab={networkTab}
+          investigation={investigation}
+          onStartInvestigation={startInvestigation}
+          onNavigate={handleNavigate}
           {...clusterPageProps}
         />
       )}
@@ -178,7 +327,18 @@ export function ConsoleApp() {
         />
       )}
 
-      {page === "profiling" && <ProfilingDashboard {...clusterPageProps} />}
+      {/* {page === "profiling" && <ProfilingDashboard {...clusterPageProps} />} */}
+      {page === "profiling" && (
+        <PageErrorBoundary fallbackTitle="Profiler failed to render">
+          <ProfilingDashboard
+            {...clusterPageProps}
+            investigation={investigation}
+            initialTab={profilerTab}
+            onInvestigationChange={handleInvestigationChange}
+            onExitInvestigation={exitInvestigation}
+          />
+        </PageErrorBoundary>
+      )}
 
       {page === "alerts" && (
         <AlertsDashboard
@@ -198,6 +358,7 @@ export function ConsoleApp() {
           onPausedChange={setPaused}
           soundMuted={soundMuted}
           onSoundMutedChange={handleSoundMutedChange}
+          investigation={investigation}
           {...clusterPageProps}
         />
       )}

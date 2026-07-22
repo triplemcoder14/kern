@@ -92,7 +92,21 @@ func podUIDFromCgroupDir(name string) (string, bool) {
 	// systemd: kubepods-burstable-pod<uid>.slice  or pod<uid>.slice
 	// cgroupfs: pod<uid>
 	lower := strings.ToLower(name)
-	idx := strings.Index(lower, "pod")
+	// idx := strings.Index(lower, "pod") // matched kubepods; walk past that prefix.
+	idx := -1
+	for i := 0; i < len(lower); {
+		rel := strings.Index(lower[i:], "pod")
+		if rel < 0 {
+			break
+		}
+		abs := i + rel
+		if abs >= 4 && lower[abs-4:abs] == "kube" {
+			i = abs + 3
+			continue
+		}
+		idx = abs
+		break
+	}
 	if idx < 0 {
 		return "", false
 	}
