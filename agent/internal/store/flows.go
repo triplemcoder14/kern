@@ -99,10 +99,13 @@ func (s *FlowStore) Upsert(flow Flow) {
 
 	if first, ok := s.firstSeen[key]; ok {
 		flow.FirstSeen = first
-		if measuredLatency == nil {
-			latency := estimateLatencyMs(key, first, now)
-			flow.LatencyMs = &latency
-		}
+		// Keep measured RTT only — do not invent latency from connection age / hash.
+		// Fake estimates made ~1ms postgres RTTs look like multi-ms hops on the map.
+		// if measuredLatency == nil {
+		// 	latency := estimateLatencyMs(key, first, now)
+		// 	flow.LatencyMs = &latency
+		// }
+		_ = measuredLatency
 	} else {
 		flow.FirstSeen = now
 		s.firstSeen[key] = now

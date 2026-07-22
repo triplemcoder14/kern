@@ -4,6 +4,12 @@ import {
   buildTcpHealthSummary,
 } from "../../../core/network/investigation-insights";
 import type { NetworkFlow } from "../../../core/types/network";
+import { useFrozenWhileSelected, useStickyById } from "../../hooks/useStickySelection";
+import type { InvestigationFocus } from "../../investigation/types";
+import {
+  investigationLabel,
+  investigationWindowLabel,
+} from "../../investigation/types";
 
 function formatMs(value?: number): string {
   return value === undefined ? "—" : `${Math.round(value)}ms`;
@@ -17,16 +23,28 @@ function formatTime(iso: string): string {
   return date.toLocaleTimeString();
 }
 
-export function TcpHealthTab({ flows }: { flows: NetworkFlow[] }) {
+export function TcpHealthTab({
+  flows,
+  investigation = null,
+}: {
+  flows: NetworkFlow[];
+  investigation?: InvestigationFocus | null;
+}) {
   const [problemsOnly, setProblemsOnly] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const summary = useMemo(() => buildTcpHealthSummary(flows), [flows]);
-  const events = useMemo(
+  const liveEvents = useMemo(
     () => buildTcpEventRows(flows, problemsOnly),
     [flows, problemsOnly],
   );
-  const selected = events.find((row) => row.id === selectedId) ?? null;
+  const events = useFrozenWhileSelected(liveEvents, selectedId != null);
+  const selected = useStickyById(events, selectedId);
+  const allTcp = useMemo(() => buildTcpEventRows(flows, false), [flows]);
+  const focusLabel = investigation ? investigationLabel(investigation) : null;
+  const windowLabel = investigation
+    ? investigationWindowLabel(investigation.window)
+    : "this window";
 
   const cards = [
     { label: "Connections", value: String(summary.connections) },
@@ -37,6 +55,19 @@ export function TcpHealthTab({ flows }: { flows: NetworkFlow[] }) {
     { label: "OK", value: String(summary.ok) },
     { label: "P95 Latency", value: formatMs(summary.p95LatencyMs) },
   ];
+
+  let emptyMessage: string;
+  if (events.length === 0 && problemsOnly && allTcp.length > 0) {
+    emptyMessage = focusLabel
+      ? `${allTcp.length} healthy connection${allTcp.length === 1 ? "" : "s"} involving ${focusLabel} ${allTcp.length === 1 ? "was" : "were"} observed. No drops, resets, retransmits, or timeouts occurred.`
+      : "No TCP problems in this window — toggle off “Problems only” to see all connections.";
+  } else if (events.length === 0 && allTcp.length === 0) {
+    emptyMessage = focusLabel
+      ? `No TCP activity involving ${focusLabel} was observed in the ${windowLabel.toLowerCase()}. KERN is listening for new events.`
+      : "No TCP flows yet.";
+  } else {
+    emptyMessage = "";
+  }
 
   return (
     <div className="network-ws-overview">
@@ -54,7 +85,10 @@ export function TcpHealthTab({ flows }: { flows: NetworkFlow[] }) {
           <input
             type="checkbox"
             checked={problemsOnly}
-            onChange={(event) => setProblemsOnly(event.target.checked)}
+            onChange={(event) => {
+              setProblemsOnly(event.target.checked);
+              setSelectedId(null);
+            }}
           />
           Problems only (drops, timeouts, retries, retransmits)
         </label>
@@ -66,9 +100,12 @@ export function TcpHealthTab({ flows }: { flows: NetworkFlow[] }) {
           <div className="network-ws-table-wrap">
             {events.length === 0 ? (
               <div className="empty-state">
+                {/* Previous:
                 {problemsOnly
                   ? "No TCP problems in this window — toggle off “Problems only” to see all connects."
                   : "No TCP flows yet."}
+                */}
+                {emptyMessage}
               </div>
             ) : (
               <table className="network-ws-path-table">

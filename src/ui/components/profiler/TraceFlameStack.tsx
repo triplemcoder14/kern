@@ -8,6 +8,16 @@ import {
 } from "../../../core/network/flame-colors";
 import type { ProcessSample, ProfileStackFrame } from "../../../core/types/profiling";
 import type { InvestigationTarget } from "./InvestigationPanel";
+import { buildStackInvestigationTarget } from "./InvestigationPanel";
+// import { InvestigationWorkflowPanel } from "./InvestigationWorkflowPanel";
+import {
+  buildInvestigationWorkflow,
+  // explainStackFrame,
+  type InvestigationEvidence,
+  type InvestigationNextStep,
+  type LayeredHotspot,
+} from "./investigation-workflow";
+// Previous insight UI used buildCpuInsight() below — panel swapped to InvestigationWorkflowPanel.
 
 function formatBytes(value?: number): string {
   if (value === undefined || value <= 0) {
@@ -55,11 +65,11 @@ function formatFrameKind(kind?: string): string {
   switch (kind) {
     case "app":
     case "application":
-      return "Application";
+      return "Application code";
     case "runtime":
-      return "Runtime";
+      return "Language runtime";
     case "library":
-      return "Library";
+      return "Shared libraries";
     case "user":
       return "Userspace";
     case "kernel":
@@ -85,7 +95,8 @@ const DEFAULT_CPU_LAYERS: Record<CpuLayerKey, boolean> = {
 };
 
 function layerKeyFor(frame: ProfileStackFrame): CpuLayerKey | null {
-  if (frame.kind === "app" || frame.kind === "application") {
+  if (frame.kind === "app") {
+  // if (frame.kind === "app" || frame.kind === "application") {
     return "app";
   }
   if (frame.kind === "runtime") {
@@ -122,12 +133,13 @@ function applyLayerFilter(
     });
 }
 
-function frameContains(parent: ProfileStackFrame, child: ProfileStackFrame): boolean {
-  return (
-    child.offset >= parent.offset - 0.0001 &&
-    child.offset + child.width <= parent.offset + parent.width + 0.0001
-  );
-}
+// Previously used for subtree hit-testing; focus zoom now uses offset/width inline.
+// function frameContains(parent: ProfileStackFrame, child: ProfileStackFrame): boolean {
+//   return (
+//     child.offset >= parent.offset - 0.0001 &&
+//     child.offset + child.width <= parent.offset + parent.width + 0.0001
+//   );
+// }
 
 function crossesSyscallBoundary(frame: ProfileStackFrame, all: ProfileStackFrame[]): boolean {
   if (frame.kind !== "kernel") {
@@ -194,7 +206,8 @@ function isSyncSymbol(label: string): boolean {
 function frameHotspotScore(frame: ProfileStackFrame): number {
   const share = frame.sharePct ?? 0;
   let weight = 1;
-  if (frame.kind === "app" || frame.kind === "application") {
+  if (frame.kind === "app") {
+  // if (frame.kind === "app" || frame.kind === "application") {
     weight = 4;
   } else if (frame.kind === "runtime") {
     weight = 3.5;
@@ -222,6 +235,8 @@ type CpuInsight = {
   title: string;
   summary: string;
   confidence: "Low" | "Medium" | "High";
+  /** Short reasons that explain the confidence rating (interpretation, not certainty). */
+  confidenceReasons: string[];
   evidence: InsightEvidence[];
   focusLabel?: string;
 };
@@ -229,6 +244,7 @@ type CpuInsight = {
 // Previous descriptive insight (no confidence wording / interpretation):
 // function buildCpuInsight(frames: ProfileStackFrame[]): string | null { ... }
 
+/** @deprecated Retained for rollback — UI uses buildInvestigationWorkflow instead. */
 function buildCpuInsight(
   frames: ProfileStackFrame[],
   processes?: ProcessSample[],
@@ -259,7 +275,8 @@ function buildCpuInsight(
     } else if (frame.kind === "runtime") {
       runtimeSamples += samples;
       userSamples += samples;
-    } else if (frame.kind === "app" || frame.kind === "application") {
+    } else if (frame.kind === "app") {
+    // } else if (frame.kind === "app" || frame.kind === "application") {
       appSamples += samples;
       userSamples += samples;
     } else if (isStackLayerKind(frame.kind)) {
@@ -332,10 +349,28 @@ function buildCpuInsight(
   }
 
   let confidence: CpuInsight["confidence"] = "Medium";
+  const confidenceReasons: string[] = [];
+  const sampleCount = frames.find((frame) => isRootCpuFrame(frame))?.samples;
+  if (sampleCount !== undefined && sampleCount >= 50_000) {
+    confidenceReasons.push(`${formatSampleCount(sampleCount)} samples in this view`);
+  } else if (sampleCount !== undefined && sampleCount > 0) {
+    confidenceReasons.push(`Limited sample count (${formatSampleCount(sampleCount)})`);
+  }
+  if (evidence.length >= 2) {
+    confidenceReasons.push(`${evidence.length} corroborating signals`);
+  }
+  if ((kernelPct ?? 0) >= 50 || (userPct ?? 0) >= 55) {
+    confidenceReasons.push("Clear userspace vs kernel balance");
+  }
   if (evidence.length >= 3 && (workloadShare ?? 0) >= 25) {
     confidence = "High";
   } else if (evidence.length <= 1 || (workloadShare ?? 0) < 12) {
     confidence = "Low";
+    if (confidenceReasons.length === 0) {
+      confidenceReasons.push("Sparse evidence in this sample window");
+    }
+  } else if (confidenceReasons.length === 0) {
+    confidenceReasons.push("Interpretation from sampled stacks — not a certainty");
   }
 
   const transition = topSync?.label ?? topKernel?.label;
@@ -344,19 +379,33 @@ function buildCpuInsight(
   ];
   if (transition && (kernelPct ?? 0) >= 50) {
     summaryParts.push(
-      `Most execution entered the kernel through ${transition}(), suggesting blocked or waiting workers rather than active computation.`,
+      `Most sampled CPU entered the kernel through ${transition}(). This usually indicates workers spending time waiting rather than actively performing computation.`,
     );
   } else if (interpretation) {
     summaryParts.push(interpretation);
   }
 
   return {
-    title: "Likely hotspot",
+    title: "Investigation Summary",
     summary: summaryParts.join(" "),
     confidence,
+    confidenceReasons,
     evidence,
     focusLabel: topSync?.label ?? top.label,
   };
+}
+
+// Retained for rollback — UI now uses buildInvestigationWorkflow / InvestigationWorkflowPanel.
+void buildCpuInsight;
+
+function formatSampleCount(value: number): string {
+  if (value >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(1)}M`;
+  }
+  if (value >= 1_000) {
+    return `${Math.round(value / 1000)}k`;
+  }
+  return String(value);
 }
 
 function interpretCpuHotspot(
@@ -378,7 +427,7 @@ function interpretCpuHotspot(
 
   if (syncHints.some((hint) => label.includes(hint) || kernel.includes(hint))) {
     // return "Likely waiting on thread synchronization rather than active computation — blocked or idle workers are a common cause.";
-    return "Likely waiting on thread synchronization rather than active computation.";
+    return "Samples concentrate on wait/sync paths. This usually means workers are blocked or idle rather than actively computing.";
   }
   if (netHints.some((hint) => label.includes(hint) || kernel.includes(hint))) {
     return "Most kernel activity looks network-related — this profile suggests a network-bound workload.";
@@ -395,7 +444,7 @@ function interpretCpuHotspot(
     label.startsWith("runtime.") ||
     (stats.runtimeSamples > 0 && stats.runtimeSamples >= stats.appSamples * 2)
   ) {
-    return "CPU time looks dominated by runtime machinery rather than application code.";
+    return "CPU time looks dominated by language-runtime machinery rather than application code.";
   }
   if (top.kind === "app" && (stats.userPct ?? 0) >= 65) {
     return "Application frames dominate sampled userspace time — focus on this code path first.";
@@ -446,6 +495,7 @@ function podNameFromPath(path?: string): string | undefined {
   const parts = path.split("/");
   return parts[parts.length - 1] || undefined;
 }
+void podNameFromPath;
 
 function ancestorBreadcrumb(
   frames: ProfileStackFrame[],
@@ -505,6 +555,13 @@ interface TraceFlameStackProps {
   onPausedChange?: (paused: boolean) => void;
   /** Hottest processes on the node — used to attribute findings to a workload. */
   processes?: ProcessSample[];
+  /** Cross-surface navigation from recommended next steps. */
+  onNavigate?: (target: "memory" | "network" | "events" | "profiling") => void;
+  /** Apply a sidebar next-step / evidence command to the live flame. */
+  command?: InvestigationNextStep | null;
+  /** Bumps whenever the same step is re-issued from the investigation sidebar. */
+  commandSeq?: number;
+  onCommandHandled?: () => void;
 }
 
 export function TraceFlameStack({
@@ -520,7 +577,12 @@ export function TraceFlameStack({
   paused: pausedProp,
   onPausedChange,
   processes,
+  onNavigate,
+  command,
+  commandSeq = 0,
+  onCommandHandled,
 }: TraceFlameStackProps) {
+  // void _nodeName; — was renamed away, then sticky-frame logic still used `nodeName` (crash).
   const title =
     label ??
     (variant === "cpu"
@@ -541,10 +603,13 @@ export function TraceFlameStack({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [pinnedFrame, setPinnedFrame] = useState<ProfileStackFrame | null>(null);
   const [focusId, setFocusId] = useState<string | null>(null);
+  const [focusStack, setFocusStack] = useState<string[]>([]);
   const [highlightLabel, setHighlightLabel] = useState<string | null>(null);
   const [layers, setLayers] = useState<Record<CpuLayerKey, boolean>>(DEFAULT_CPU_LAYERS);
   const [pausedLocal, setPausedLocal] = useState(false);
   const frozenFramesRef = useRef<ProfileStackFrame[] | null>(null);
+  const lastGoodFramesRef = useRef<ProfileStackFrame[]>([]);
+  const lastNodeRef = useRef<string | undefined>(nodeName);
 
   const paused = pausedProp ?? pausedLocal;
   const setPaused = (next: boolean) => {
@@ -555,14 +620,27 @@ export function TraceFlameStack({
   };
 
   useEffect(() => {
+    if (lastNodeRef.current !== nodeName) {
+      lastNodeRef.current = nodeName;
+      lastGoodFramesRef.current = [];
+      frozenFramesRef.current = null;
+    }
+    if (frames.length > 0) {
+      lastGoodFramesRef.current = frames;
+    }
+  }, [frames, nodeName]);
+
+  useEffect(() => {
     if (!paused) {
-      frozenFramesRef.current = frames;
+      frozenFramesRef.current = frames.length > 0 ? frames : lastGoodFramesRef.current;
     } else if (!frozenFramesRef.current) {
-      frozenFramesRef.current = frames;
+      frozenFramesRef.current = frames.length > 0 ? frames : lastGoodFramesRef.current;
     }
   }, [frames, paused]);
 
-  const stableFrames = paused && frozenFramesRef.current ? frozenFramesRef.current : frames;
+  // Keep last non-empty flame while live polls briefly return no samples.
+  const liveFrames = frames.length > 0 ? frames : lastGoodFramesRef.current;
+  const stableFrames = paused && frozenFramesRef.current ? frozenFramesRef.current : liveFrames;
 
   const rootFrame = stableFrames.find((frame) => isRootCpuFrame(frame)) ?? stableFrames[0] ?? null;
   const totalSamples = rootFrame?.samples;
@@ -630,13 +708,23 @@ export function TraceFlameStack({
     [stableFrames],
   );
 
-  const cpuInsight = useMemo(
-    // () => (variant === "cpu" ? buildCpuInsight(stableFrames) : null),
-    () => (variant === "cpu" ? buildCpuInsight(stableFrames, processes) : null),
-    [stableFrames, processes, variant],
+  // Previous summary panel:
+  // const cpuInsight = useMemo(
+  //   () => (variant === "cpu" ? buildCpuInsight(stableFrames, processes) : null),
+  //   [stableFrames, processes, variant],
+  // );
+  const investigationWorkflow = useMemo(
+    () =>
+      variant === "cpu"
+        ? buildInvestigationWorkflow(stableFrames, processes, {
+            windowSeconds: windowSeconds,
+            sampleHz,
+          })
+        : null,
+    [stableFrames, processes, sampleHz, variant, windowSeconds],
   );
 
-  const applyInsightEvidence = (item: InsightEvidence) => {
+  const applyInsightEvidence = (item: InsightEvidence | InvestigationEvidence) => {
     frozenFramesRef.current = frames;
     setPaused(true);
     if (item.action === "kernel-only") {
@@ -658,20 +746,55 @@ export function TraceFlameStack({
         setSelectedId(id);
         setPinnedFrame(match);
         setFocusId(id);
-        onSelect?.({
-          kind: "stack",
-          label: match.label,
-          heat: framePressureHeat(match),
-          depth: match.depth,
-          namespace: match.namespace,
-          path: match.path,
-          subtitle: match.subtitle,
-          sharePct: match.sharePct,
-          samples: match.samples,
-        });
+        onSelect?.(buildStackInvestigationTarget(match, stableFrames, processes));
+        // Previous sparse stack target (no ownership / parent-child):
+        // onSelect?.({
+        //   kind: "stack",
+        //   label: match.label,
+        //   heat: framePressureHeat(match),
+        //   depth: match.depth,
+        //   namespace: match.namespace,
+        //   path: match.path,
+        //   subtitle: match.subtitle,
+        //   sharePct: match.sharePct,
+        //   samples: match.samples,
+        // });
       }
     }
   };
+
+  const applyHotspot = (item: LayeredHotspot) => {
+    applyInsightEvidence({
+      id: item.id,
+      text: item.label,
+      action: "focus-label",
+      focusLabel: item.focusLabel,
+    });
+  };
+
+  const applyNextStep = (item: InvestigationNextStep) => {
+    if (item.action === "navigate" && item.nav) {
+      onNavigate?.(item.nav);
+      return;
+    }
+    applyInsightEvidence({
+      id: item.id,
+      text: item.label,
+      action: item.action === "navigate" ? undefined : item.action,
+      focusLabel: item.focusLabel,
+    });
+  };
+  // void applyNextStep;
+
+  useEffect(() => {
+    if (!command || commandSeq <= 0) {
+      return;
+    }
+    applyNextStep(command);
+    onCommandHandled?.();
+    // Run once per issued command from the investigation sidebar.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [commandSeq]);
 
   const focusTarget = useMemo(() => {
     if (!focusId) {
@@ -696,17 +819,19 @@ export function TraceFlameStack({
     setPaused(true);
     setSelectedId(id);
     setPinnedFrame(frame);
-    onSelect?.({
-      kind: "stack",
-      label: frame.label,
-      heat: framePressureHeat(frame),
-      depth: frame.depth,
-      namespace: frame.namespace,
-      path: frame.path,
-      subtitle: frame.subtitle,
-      sharePct: frame.sharePct,
-      samples: frame.samples,
-    });
+    onSelect?.(buildStackInvestigationTarget(frame, stableFrames, processes));
+    // Previous sparse stack target (no ownership / parent-child):
+    // onSelect?.({
+    //   kind: "stack",
+    //   label: frame.label,
+    //   heat: framePressureHeat(frame),
+    //   depth: frame.depth,
+    //   namespace: frame.namespace,
+    //   path: frame.path,
+    //   subtitle: frame.subtitle,
+    //   sharePct: frame.sharePct,
+    //   samples: frame.samples,
+    // });
   };
 
   const resumeLive = () => {
@@ -730,22 +855,52 @@ export function TraceFlameStack({
   const height = depthRows * rowHeight + 10;
   const shareTone = flameShareTone(selected?.sharePct);
 
-  const selectedPod =
-    selected?.depth === 1
-      ? selected.label
-      : podNameFromPath(selected?.path) ?? (selected && !isOffsetSubtitle(selected.subtitle) && !isNumericSubtitle(selected.subtitle)
-          ? selected.subtitle
-          : undefined);
-  const selectedThread =
-    selected && selected.depth === 2 && isNumericSubtitle(selected.subtitle)
-      ? selected.subtitle
-      : undefined;
-  const selectedBreadcrumb = selected ? ancestorBreadcrumb(stableFrames, selected) : [];
-  const stackPath = selected
-    ? [...selectedBreadcrumb, selected]
-        .filter((frame) => frame.depth >= 2 || isStackLayerKind(frame.kind))
-        .map((frame) => frame.label)
-    : [];
+  // Used by the below-flame CPU detail (commented out — Investigation sidebar owns selection).
+  // const selectedPod =
+  //   selected?.depth === 1
+  //     ? selected.label
+  //     : podNameFromPath(selected?.path) ?? (selected && !isOffsetSubtitle(selected.subtitle) && !isNumericSubtitle(selected.subtitle)
+  //         ? selected.subtitle
+  //         : undefined);
+  // const selectedThread =
+  //   selected && selected.depth === 2 && isNumericSubtitle(selected.subtitle)
+  //     ? selected.subtitle
+  //     : undefined;
+  // const selectedBreadcrumb = selected ? ancestorBreadcrumb(stableFrames, selected) : [];
+  // const frameExplanation = selected && variant === "cpu" ? explainStackFrame(selected) : null;
+  // const stackPath = selected
+  //   ? [...selectedBreadcrumb, selected]
+  //       .filter((frame) => frame.depth >= 2 || isStackLayerKind(frame.kind))
+  //       .map((frame) => frame.label)
+  //   : [];
+
+  const zoomToFrame = (id: string | null) => {
+    if (id === null) {
+      setFocusStack([]);
+      setFocusId(null);
+      return;
+    }
+    setFocusStack((current) => (focusId ? [...current, focusId] : current));
+    setFocusId(id);
+  };
+
+  const zoomBack = () => {
+    setFocusStack((current) => {
+      if (current.length === 0) {
+        setFocusId(null);
+        return current;
+      }
+      const next = [...current];
+      const parent = next.pop() ?? null;
+      setFocusId(parent);
+      return next;
+    });
+  };
+
+  const zoomReset = () => {
+    setFocusStack([]);
+    setFocusId(null);
+  };
 
   const toggleLayer = (key: CpuLayerKey) => {
     setLayers((current) => ({ ...current, [key]: !current[key] }));
@@ -761,11 +916,11 @@ export function TraceFlameStack({
               {variant === "cpu" ? (
                 <>
                   <span className="network-flame-legend-swatch network-flame-legend-app" />
-                  Application
+                  Application code
                   <span className="network-flame-legend-swatch network-flame-legend-runtime" />
-                  Runtime
+                  Language runtime
                   <span className="network-flame-legend-swatch network-flame-legend-user" />
-                  Library
+                  Shared libraries
                   <span className="network-flame-legend-swatch network-flame-legend-kernel" />
                   Kernel
                 </>
@@ -800,15 +955,35 @@ export function TraceFlameStack({
                 Pause
               </button>
             )}
-            {focusId ? (
+            <div className="network-flame-zoom-btns" role="group" aria-label="Flamegraph zoom">
               <button
                 type="button"
                 className="network-flame-reset"
-                onClick={() => setFocusId(null)}
+                disabled={focusStack.length === 0 && !focusId}
+                onClick={zoomBack}
+                title="Back one zoom level"
               >
-                Reset zoom
+                ← Back
               </button>
-            ) : null}
+              <button
+                type="button"
+                className="network-flame-reset"
+                disabled={!focusId}
+                onClick={zoomReset}
+                title="Reset zoom to full profile"
+              >
+                Reset
+              </button>
+              <button
+                type="button"
+                className="network-flame-reset"
+                disabled={!focusId}
+                onClick={zoomReset}
+                title="Fit full profile in view"
+              >
+                Fit
+              </button>
+            </div>
           </div>
         </div>
         <p className="network-flame-hint">{hint}</p>
@@ -818,16 +993,22 @@ export function TraceFlameStack({
           </p>
         ) : null} */}
 
+        {/* Previous Investigation Summary card (confidence + evidence only):
         {variant === "cpu" && cpuInsight ? (
           <div className="network-flame-insight" role="status">
-            {/* <span className="profile-panel-label">Top finding</span> */}
-            {/* <p>{cpuInsight.body}</p> */}
             <div className="network-flame-insight-head">
               <span className="profile-panel-label">{cpuInsight.title}</span>
               <span className={`network-flame-confidence network-flame-confidence-${cpuInsight.confidence.toLowerCase()}`}>
                 Confidence: {cpuInsight.confidence}
               </span>
             </div>
+            {cpuInsight.confidenceReasons.length > 0 ? (
+              <ul className="network-flame-confidence-reasons">
+                {cpuInsight.confidenceReasons.map((reason) => (
+                  <li key={reason}>{reason}</li>
+                ))}
+              </ul>
+            ) : null}
             <p>{cpuInsight.summary}</p>
             {cpuInsight.evidence.length > 0 ? (
               <div className="network-flame-evidence">
@@ -853,14 +1034,29 @@ export function TraceFlameStack({
             ) : null}
           </div>
         ) : null}
+        */}
+
+        {/* Investigation assistant used to render above the flame (summary / questions /
+            hotspots / quality). That competed with the profile — moved to the sidebar
+            after frame selection, with hotspots beside the graph instead.
+        {variant === "cpu" && investigationWorkflow ? (
+          <InvestigationWorkflowPanel
+            workflow={investigationWorkflow}
+            frameExplanation={frameExplanation}
+            onEvidence={applyInsightEvidence}
+            onHotspot={applyHotspot}
+            onNextStep={applyNextStep}
+          />
+        ) : null}
+        */}
 
         {variant === "cpu" ? (
           <div className="network-flame-layers" role="group" aria-label="Stack layers">
             {(
               [
-                ["app", "Application"],
-                ["runtime", "Runtime"],
-                ["library", "Library"],
+                ["app", "Application code"],
+                ["runtime", "Language runtime"],
+                ["library", "Shared libraries"],
                 ["kernel", "Kernel"],
               ] as const
             ).map(([key, labelText]) => (
@@ -884,7 +1080,10 @@ export function TraceFlameStack({
                 <button
                   type="button"
                   className="network-flame-crumb-btn"
-                  onClick={() => setFocusId(frameKey(frame, index))}
+                  onClick={() => {
+                    setFocusStack((current) => current.slice(0, index));
+                    setFocusId(frameKey(frame, index));
+                  }}
                 >
                   {frame.label}
                 </button>
@@ -943,6 +1142,8 @@ export function TraceFlameStack({
           />
         ) : null}
 
+        <div className="network-flame-hero">
+          <div className="network-flame-hero-main">
         {(variant === "cpu" || variant === "memory") && overviewFrames.length > 0 ? (
           <svg
             className="profile-flame-overview"
@@ -1011,8 +1212,13 @@ export function TraceFlameStack({
                 frame.sharePct !== undefined &&
                 blockWidth >= 72;
               const showSyscallBoundary =
-                variant === "cpu" && crossesSyscallBoundary(frame, layerFiltered) && blockWidth >= 36;
-              const showLabel = blockWidth >= 22;
+                variant === "cpu" &&
+                crossesSyscallBoundary(frame, layerFiltered) &&
+                // blockWidth >= 36;
+                blockWidth >= 48;
+              // const showLabel = blockWidth >= 22;
+              const showLabel = blockWidth >= 28;
+              const clipId = `flame-clip-${id.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
               return (
                 <g
                   key={id}
@@ -1021,13 +1227,14 @@ export function TraceFlameStack({
                   onClick={() => pauseForInspect(frame, id)}
                   onDoubleClick={() => {
                     pauseForInspect(frame, id);
-                    setFocusId(id);
+                    zoomToFrame(id);
                   }}
                 >
                   <title>
                     {[
                       frame.label,
                       isStackLayerKind(frame.kind) ? formatFrameKind(frame.kind) : null,
+                      showSyscallBoundary ? "Userspace → kernel (syscall boundary)" : null,
                       frame.binary ? `Binary: ${frame.binary}` : null,
                       isOffsetSubtitle(frame.subtitle) ? `Offset: ${frame.subtitle}` : frame.subtitle,
                       variant === "memory" && frame.bytes !== undefined
@@ -1041,31 +1248,22 @@ export function TraceFlameStack({
                       .filter(Boolean)
                       .join(" · ")}
                   </title>
+                  <defs>
+                    <clipPath id={clipId}>
+                      <rect x={x} y={y} width={Math.max(1, blockWidth)} height={24} rx={blockWidth < 8 ? 1 : 3} />
+                    </clipPath>
+                  </defs>
+                  {/* Previous: "syscall boundary" text at y-5 overlapped the frame above
+                      (row gap is only ~4px). Keep a hairline on this frame only.
                   {showSyscallBoundary ? (
                     <g className="network-flame-syscall-boundary">
-                      <line
-                        x1={x}
-                        x2={x + blockWidth}
-                        y1={y - 2}
-                        y2={y - 2}
-                        stroke="rgba(255,255,255,0.35)"
-                        strokeWidth={1}
-                        strokeDasharray="3 3"
-                      />
+                      <line ... />
                       {blockWidth >= 120 ? (
-                        <text
-                          x={x + blockWidth / 2}
-                          y={y - 5}
-                          textAnchor="middle"
-                          className="profile-flame-label"
-                          fill="rgba(255,255,255,0.45)"
-                          fontSize={8}
-                        >
-                          syscall boundary
-                        </text>
+                        <text ...>syscall boundary</text>
                       ) : null}
                     </g>
                   ) : null}
+                  */}
                   <rect
                     x={x}
                     y={y}
@@ -1076,15 +1274,30 @@ export function TraceFlameStack({
                     stroke={
                       isSelected || isHighlighted
                         ? "rgba(255,255,255,0.55)"
-                        : "rgba(0,0,0,0.18)"
+                        : showSyscallBoundary
+                          ? "rgba(255,255,255,0.28)"
+                          : "rgba(0,0,0,0.18)"
                     }
-                    strokeWidth={isSelected || isHighlighted ? 1.6 : 0.5}
+                    strokeWidth={isSelected || isHighlighted ? 1.6 : showSyscallBoundary ? 1 : 0.5}
                   />
+                  {showSyscallBoundary ? (
+                    <line
+                      className="network-flame-syscall-boundary"
+                      x1={x + 2}
+                      x2={x + Math.max(3, blockWidth - 2)}
+                      y1={y + 1.5}
+                      y2={y + 1.5}
+                      stroke="rgba(255,255,255,0.4)"
+                      strokeWidth={1}
+                      strokeDasharray="2 2"
+                    />
+                  ) : null}
                   {showLabel ? (
-                    showPidLine || showRootShare ? (
+                    <g clipPath={`url(#${clipId})`}>
+                    {showPidLine || showRootShare ? (
                       <>
                         <text
-                          x={x + 8}
+                          x={x + 6}
                           y={y + 11}
                           className="profile-flame-label profile-flame-label-primary"
                           fill={flameLabelColor(heat)}
@@ -1092,7 +1305,7 @@ export function TraceFlameStack({
                           {frameDisplayLabel(frame, chars)}
                         </text>
                         <text
-                          x={x + 8}
+                          x={x + 6}
                           y={y + 21}
                           className="profile-flame-label profile-flame-label-secondary"
                           fill={flameLabelColor(heat)}
@@ -1103,23 +1316,54 @@ export function TraceFlameStack({
                       </>
                     ) : (
                       <text
-                        x={x + 8}
+                        x={x + 6}
                         y={y + 15}
                         className="profile-flame-label"
                         fill={flameLabelColor(heat)}
                       >
                         {frameDisplayLabel(frame, chars)}
                       </text>
-                    )
+                    )}
+                    </g>
                   ) : null}
                 </g>
               );
             })}
           </svg>
         </div>
+          </div>
+
+          {variant === "cpu" && (investigationWorkflow?.hotspots.length ?? 0) > 0 ? (
+            <aside className="network-flame-hotspots-rail" aria-label="Top hotspots">
+              <span className="profile-panel-label">Top hotspots</span>
+              <ul className="network-flame-hotspots-list">
+                {investigationWorkflow!.hotspots.map((item) => (
+                  <li key={item.id}>
+                    <button
+                      type="button"
+                      className="network-flame-hotspot-rail-btn"
+                      onClick={() => applyHotspot(item)}
+                    >
+                      <span className="network-flame-hotspot-rail-layer">{item.layer}</span>
+                      <span className="network-flame-hotspot-rail-label" title={item.label}>
+                        {item.label}
+                      </span>
+                      <span className="network-flame-hotspot-rail-share">{item.sharePct}%</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </aside>
+          ) : null}
+        </div>
       </div>
 
-      {selected ? (
+      {/* Below-flame CPU detail moved to Investigation sidebar after click.
+      {selected && variant === "cpu" ? (
+        <div className={`network-flame-detail ...`}>...</div>
+      ) : null}
+      */}
+      {selected && variant !== "cpu" ? (
         <div className={`network-flame-detail network-flame-detail-${shareTone}`}>
           <div className="network-flame-detail-head">
             <div>
@@ -1135,26 +1379,8 @@ export function TraceFlameStack({
               !isOffsetSubtitle(selected.subtitle) ? (
                 <p className="network-flame-detail-sub">{selected.subtitle}</p>
               ) : null}
-              {isRootCpuFrame(selected) && nodeName?.trim() ? (
-                <p className="network-flame-detail-sub">Node: {nodeName}</p>
-              ) : null}
-              {selectedThread ? (
-                <p className="network-flame-detail-sub">PID {selectedThread}</p>
-              ) : null}
             </div>
             <div className="network-flame-detail-actions">
-              {variant === "cpu" && selected.depth > 0 ? (
-                <button
-                  type="button"
-                  className="network-flame-reset"
-                  onClick={() => {
-                    setPaused(true);
-                    setFocusId(selected.id ?? frameKey(selected));
-                  }}
-                >
-                  Focus subtree
-                </button>
-              ) : null}
               {selected.sharePct !== undefined ? (
                 <span className={`network-flame-share network-flame-share-${shareTone}`}>
                   {selected.sharePct}%
@@ -1162,58 +1388,8 @@ export function TraceFlameStack({
               ) : null}
             </div>
           </div>
-
-          {variant === "cpu" && stackPath.length > 1 ? (
-            <div className="network-flame-breadcrumb" aria-label="Stack path">
-              {stackPath.map((pathLabel, index) => (
-                <span key={`${pathLabel}-${index}`}>
-                  {index > 0 ? <span className="network-flame-breadcrumb-sep">↓</span> : null}
-                  <span title={pathLabel}>{pathLabel}</span>
-                </span>
-              ))}
-            </div>
-          ) : null}
-
           <div className="network-flame-detail-grid">
-            {variant === "cpu" ? (
-              <>
-                <DetailRow label="Frame" value={selected.label} />
-                <DetailRow label="Type" value={formatFrameKind(selected.kind)} />
-                <DetailRow
-                  label="CPU"
-                  value={selected.sharePct !== undefined ? `${selected.sharePct}%` : "—"}
-                  hint="Share of sampled node CPU in this window."
-                />
-                <DetailRow
-                  label="Samples"
-                  value={selected.samples !== undefined ? selected.samples.toLocaleString() : "—"}
-                />
-                <DetailRow
-                  label="Binary"
-                  value={selected.binary?.trim() ? selected.binary : "—"}
-                />
-                <DetailRow
-                  label="Offset"
-                  value={isOffsetSubtitle(selected.subtitle) ? selected.subtitle! : "—"}
-                  hint="File offset when symbols were unavailable."
-                />
-                <DetailRow label="Pod" value={selectedPod?.trim() ? selectedPod : "—"} />
-                <DetailRow
-                  label="PID"
-                  value={selectedThread ?? "—"}
-                  hint="Linux PID for this process frame."
-                />
-                <DetailRow
-                  label="Namespace"
-                  value={selected.namespace?.trim() ? selected.namespace : "—"}
-                />
-                <DetailRow label="Node" value={nodeName?.trim() ? nodeName : "—"} />
-                <DetailRow
-                  label="Sampling window"
-                  value={sampleSeconds !== undefined ? `${sampleSeconds}s` : `${windowSeconds}s`}
-                />
-              </>
-            ) : variant === "memory" ? (
+            {variant === "memory" ? (
               <>
                 <DetailRow
                   label="Retained memory"
@@ -1240,7 +1416,6 @@ export function TraceFlameStack({
                 <DetailRow
                   label="Pod namespace"
                   value={selected.namespace?.trim() ? selected.namespace : "—"}
-                  hint="Set on destination/workload frames (depth ≥ 2). Protocol frames like TCP have none."
                 />
                 <DetailRow
                   label="Protocol"
@@ -1262,15 +1437,9 @@ export function TraceFlameStack({
                   label="Flows"
                   value={selected.flowCount !== undefined ? String(selected.flowCount) : "—"}
                 />
-                <DetailRow
-                  label="Flame depth"
-                  value={String(selected.depth)}
-                  hint="0 = network root → 1 = protocol → 2 = endpoint → 3 = workload"
-                />
               </>
             )}
           </div>
-
           {selected.path ? (
             <div className="network-flame-path">
               <span className="profile-panel-label">Path</span>
@@ -1282,4 +1451,3 @@ export function TraceFlameStack({
     </div>
   );
 }
-

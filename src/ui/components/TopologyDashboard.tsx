@@ -1,7 +1,9 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { filterNetworkSnapshot } from "../../core/network/scope";
 import { buildGraphLayout, type GraphEdgeLayout, type GraphLod } from "../../core/network/graph-model";
 import type { NetworkSnapshot } from "../../core/types/network";
+import { useInvestigationLayout } from "../hooks/useInvestigationLayout";
+import { useFrozenWhileSelected } from "../hooks/useStickySelection";
 import { FlowDetailPanel } from "./FlowDetailPanel";
 import { LiveFlowsTable } from "./LiveFlowsTable";
 import { PageHeader } from "./PageHeader";
@@ -29,15 +31,27 @@ export function TopologyDashboard({
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [lod, setLod] = useState<GraphLod>("service");
-  const layout = useMemo(
+  const liveLayout = useMemo(
     () => buildGraphLayout(topology, flows, { lod }),
     [topology, flows, lod],
   );
+  const investigating = selectedNodeId != null || selectedEdgeId != null;
+  const layout = useInvestigationLayout(liveLayout, investigating, lod);
+  const detailFlows = useFrozenWhileSelected(flows, investigating);
 
+  const selectedEdgeLive =
+    layout.edges.find((edge) => edge.id === selectedEdgeId) ?? null;
+  const stickyEdgeRef = useRef<GraphEdgeLayout | null>(null);
+  if (selectedEdgeId == null) {
+    stickyEdgeRef.current = null;
+  } else if (selectedEdgeLive) {
+    stickyEdgeRef.current = selectedEdgeLive;
+  }
   const selectedEdge: GraphEdgeLayout | null =
-    layout.edges.find((edge) => edge.id === selectedEdgeId) ??
-    layout.edges.find((edge) => edge.flowCount > 0) ??
-    null;
+    selectedEdgeId == null
+      ? null
+      : selectedEdgeLive ??
+        (stickyEdgeRef.current?.id === selectedEdgeId ? stickyEdgeRef.current : null);
 
   const nodeById = useMemo(() => new Map(layout.nodes.map((node) => [node.id, node])), [layout.nodes]);
   const podCount = topology.nodes.filter((node) => node.kind === "Pod").length;
@@ -70,7 +84,7 @@ export function TopologyDashboard({
           <TopologyGraph
             layout={layout}
             connected={connected}
-            selectedEdgeId={selectedEdge?.id ?? null}
+            selectedEdgeId={selectedEdgeId}
             onSelectEdge={setSelectedEdgeId}
             selectedNodeId={selectedNodeId}
             onSelectNode={setSelectedNodeId}
@@ -82,14 +96,14 @@ export function TopologyDashboard({
 
         <FlowDetailPanel
           edge={selectedEdge}
-          flows={flows}
+          flows={detailFlows}
           edges={layout.edges}
           nodeById={nodeById}
           onSelectEdge={setSelectedEdgeId}
         />
       </div>
 
-      <LiveFlowsTable flows={flows} limit={8} title="RECENT FLOWS ON MAP" />
+      <LiveFlowsTable flows={detailFlows} limit={8} title="RECENT FLOWS ON MAP" />
     </div>
   );
 }

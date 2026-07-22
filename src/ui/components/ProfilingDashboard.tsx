@@ -1,8 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { flameColor, flameShareTone } from "../../core/network/flame-colors";
 import type {
   KernelHotspot,
   NodeHealth,
+  NodeProfileDetail,
   NodeProfileSummary,
   PodConsumer,
   ProcessSample,
@@ -16,7 +17,24 @@ import { useNodeProfile } from "../hooks/useNodeProfile";
 import { MemoryWorkspace } from "./memory/MemoryWorkspace";
 import { InsightCards } from "./profiler/InsightCards";
 import { InvestigationPanel, type InvestigationTarget } from "./profiler/InvestigationPanel";
+import type { InvestigationNextStep } from "./profiler/investigation-workflow";
 import { TraceFlameStack } from "./profiler/TraceFlameStack";
+import type { InvestigationFocus } from "../investigation/types";
+import {
+  climbInvestigation,
+  drillToPod,
+  drillToProcess,
+  investigationLabel,
+  investigationLevel,
+  type InvestigationLevel,
+} from "../investigation/types";
+import { resolveInvestigationNode, podMatchesInvestigation } from "../investigation/resolve-node";
+import { filterDetailForWorkloadFocus } from "../investigation/filter-profile-for-focus";
+import { InvestigationHierarchy } from "../investigation/InvestigationHierarchy";
+import { normalizeProfileDetail } from "../../lib/profile-cache";
+import { prefetchProfileSnapshot } from "../../lib/profile-api";
+
+type ProfilerTab = "overview" | "cpu" | "memory" | "network" | "timeline";
 
 interface ProfilingDashboardProps {
   clusterName: string;
@@ -24,9 +42,14 @@ interface ProfilingDashboardProps {
   namespaces: string[];
   onNamespaceChange: (value: string) => void;
   connected: boolean;
+  investigation?: InvestigationFocus | null;
+  /** Open on this profiler tab (Investigate CPU → "cpu"). */
+  initialTab?: ProfilerTab;
+  /** Update drill-down level / restore stashed workload focus. */
+  onInvestigationChange?: (focus: InvestigationFocus) => void;
+  /** Switch to node investigation (clear workload focus). */
+  onExitInvestigation?: () => void;
 }
-
-type ProfilerTab = "overview" | "cpu" | "memory" | "network" | "timeline";
 
 function cpuStackLabel(source?: ProfileStackSource): string {
   // if (source === "ebpf") {
@@ -45,33 +68,125 @@ function isCpuRootLabel(label: string): boolean {
   return label === "all" || label === "Node CPU" || label === "CPU Samples";
 }
 
-function scopeCpuFrames<T extends { depth: number; offset: number; width: number; namespace?: string; label: string }>(
+function scopeCpuFrames<T extends { depth: number; offset: number; width: number; namespace?: string; label: string; subtitle?: string }>(
   frames: T[],
   namespace: string,
+  workloadNames: string[] = [],
+  options?: { pod?: string; pid?: number; processName?: string },
 ): T[] {
   if (!namespace || namespace === "all") {
-    return frames;
-  }
-  const pods = frames.filter(
-    (frame) => frame.depth === 1 && frame.namespace === namespace,
-  );
-  if (pods.length === 0) {
-    // return frames.filter((frame) => frame.depth === 0 || isCpuRootLabel(frame.label));
-    // Merged eBPF pyramid has no pod lanes — keep the full stack under namespace filter.
-    return frames;
-  }
-  return frames.filter((frame) => {
-    if (frame.depth === 0 || isCpuRootLabel(frame.label)) {
-      return true;
+    if (workloadNames.length === 0 && !options?.pod) {
+      return frames;
     }
-    return pods.some(
-      (pod) =>
-        frame.offset >= pod.offset - 0.0001 &&
-        frame.offset + frame.width <= pod.offset + pod.width + 0.0001,
+  }
+  const nsFrames =
+    !namespace || namespace === "all"
+      ? frames
+      : (() => {
+          const pods = frames.filter(
+            (frame) => frame.depth === 1 && frame.namespace === namespace,
+          );
+          if (pods.length === 0) {
+            // return frames.filter((frame) => frame.depth === 0 || isCpuRootLabel(frame.label));
+            // Merged eBPF pyramid has no pod lanes — keep the full stack under namespace filter.
+            return frames;
+          }
+          return frames.filter((frame) => {
+            if (frame.depth === 0 || isCpuRootLabel(frame.label)) {
+              return true;
+            }
+            return pods.some(
+              (pod) =>
+                frame.offset >= pod.offset - 0.0001 &&
+                frame.offset + frame.width <= pod.offset + pod.width + 0.0001,
+            );
+          });
+        })();
+
+  const matchesWorkload = (label: string) =>
+    workloadNames.some(
+      (name) => label === name || label.startsWith(`${name}-`) || label.includes(`/${name}`),
     );
-  });
+
+  let scoped = nsFrames;
+  if (workloadNames.length > 0) {
+    const workloadPods = nsFrames.filter(
+      (frame) => frame.depth === 1 && matchesWorkload(frame.label),
+    );
+    if (workloadPods.length > 0) {
+      scoped = nsFrames.filter((frame) => {
+        if (frame.depth === 0 || isCpuRootLabel(frame.label)) {
+          return true;
+        }
+        return workloadPods.some(
+          (pod) =>
+            frame.offset >= pod.offset - 0.0001 &&
+            frame.offset + frame.width <= pod.offset + pod.width + 0.0001,
+        );
+      });
+    }
+  }
+
+  // Drill to a single pod lane when the hierarchy is at pod/process level.
+  if (options?.pod) {
+    const podLanes = scoped.filter(
+      (frame) =>
+        frame.depth === 1 &&
+        (frame.label === options.pod || frame.label.startsWith(`${options.pod}-`)),
+    );
+    if (podLanes.length > 0) {
+      scoped = scoped.filter((frame) => {
+        if (frame.depth === 0 || isCpuRootLabel(frame.label)) {
+          return true;
+        }
+        return podLanes.some(
+          (pod) =>
+            frame.offset >= pod.offset - 0.0001 &&
+            frame.offset + frame.width <= pod.offset + pod.width + 0.0001,
+        );
+      });
+    }
+  }
+
+  // Process drill: keep frames that mention the PID / process name when present.
+  if (options?.pid !== undefined || options?.processName) {
+    const pidNeedle = options.pid !== undefined ? String(options.pid) : "";
+    const nameNeedle = options.processName?.toLowerCase() ?? "";
+    const hits = scoped.filter((frame) => {
+      if (frame.depth === 0 || isCpuRootLabel(frame.label)) {
+        return false;
+      }
+      const blob = `${frame.label} ${frame.subtitle ?? ""}`.toLowerCase();
+      if (pidNeedle && (blob.includes(`pid ${pidNeedle}`) || blob.includes(pidNeedle))) {
+        return true;
+      }
+      if (nameNeedle && blob.includes(nameNeedle)) {
+        return true;
+      }
+      return false;
+    });
+    if (hits.length > 0) {
+      const keep = new Set<T>();
+      for (const hit of hits) {
+        keep.add(hit);
+        for (const ancestor of scoped) {
+          if (
+            ancestor.depth < hit.depth &&
+            hit.offset >= ancestor.offset - 0.0001 &&
+            hit.offset + hit.width <= ancestor.offset + ancestor.width + 0.0001
+          ) {
+            keep.add(ancestor);
+          }
+        }
+      }
+      scoped = scoped.filter((frame) => keep.has(frame));
+    }
+  }
+
+  return scoped;
 }
 
+// resolveInvestigationNode / podMatchesInvestigation live in ../investigation/resolve-node.ts
 
 function healthLabel(health: NodeHealth): string {
   if (health === "ok") {
@@ -426,10 +541,21 @@ function HotspotList({
     </div>
   );
 }
+void HotspotList;
 
-function TimelineList({ events }: { events: TimelineEvent[] }) {
+function TimelineList({
+  events,
+  emptyHint,
+}: {
+  events: TimelineEvent[];
+  emptyHint?: string;
+}) {
   if (events.length === 0) {
-    return <div className="profile-log-empty">No pressure events on this node in the current sample.</div>;
+    return (
+      <div className="profile-log-empty">
+        {emptyHint ?? "No pressure events on this node in the current sample."}
+      </div>
+    );
   }
   return (
     <div className="profile-timeline profile-timeline-narrative">
@@ -449,7 +575,13 @@ function TimelineList({ events }: { events: TimelineEvent[] }) {
   );
 }
 
-function NetworkLog({ lines }: { lines: ProfileLogLine[] }) {
+function NetworkLog({
+  lines,
+  emptyHint,
+}: {
+  lines: ProfileLogLine[];
+  emptyHint?: string;
+}) {
   return (
     <div className="profile-events">
       <div className="profile-events-head">
@@ -459,7 +591,9 @@ function NetworkLog({ lines }: { lines: ProfileLogLine[] }) {
         <span>Value</span>
       </div>
       {lines.length === 0 ? (
-        <div className="profile-log-empty">No network pressure signals on this node.</div>
+        <div className="profile-log-empty">
+          {emptyHint ?? "No network pressure signals on this node."}
+        </div>
       ) : (
         lines.map((line) => (
           <div key={`${line.time}-${line.event}-${line.value}`} className="profile-log-row">
@@ -475,7 +609,10 @@ function NetworkLog({ lines }: { lines: ProfileLogLine[] }) {
 }
 
 function networkMetricsOnly(metrics: ProfileMetric[]): ProfileMetric[] {
-  return metrics.filter((metric) => ["P50", "P95", "Drops", "Flows/s"].includes(metric.label));
+  // return metrics.filter((metric) => ["P50", "P95", "Drops", "Flows/s"].includes(metric.label));
+  return metrics.filter((metric) =>
+    ["P50", "P95", "Drops", "Flows/s", "Flows"].includes(metric.label),
+  );
 }
 
 export function ProfilingDashboard({
@@ -484,81 +621,345 @@ export function ProfilingDashboard({
   namespaces,
   onNamespaceChange,
   connected,
+  investigation = null,
+  initialTab = "overview",
+  onInvestigationChange,
+  onExitInvestigation,
 }: ProfilingDashboardProps) {
-  const [selectedNode, setSelectedNode] = useState<string | undefined>();
-  const [activeTab, setActiveTab] = useState<ProfilerTab>("overview");
+  const [selectedNode, setSelectedNode] = useState<string | undefined>(
+    () => investigation?.nodeName,
+  );
+  // const [activeTab, setActiveTab] = useState<ProfilerTab>("overview");
+  const [activeTab, setActiveTab] = useState<ProfilerTab>(initialTab);
   const [investigationTarget, setInvestigationTarget] = useState<InvestigationTarget | null>(null);
   const [flamePaused, setFlamePaused] = useState(false);
-  // const { profile, loading, error } = useNodeProfile(connected, selectedNode);
-  // Pause node profile polling while the flame is frozen for inspection.
-  const { profile, loading, error } = useNodeProfile(connected, selectedNode, {
+  const [flameCommand, setFlameCommand] = useState<InvestigationNextStep | null>(null);
+  const [flameCommandSeq, setFlameCommandSeq] = useState(0);
+  const profilerTabsRef = useRef<HTMLDivElement>(null);
+  const userPickedNodeRef = useRef(false);
+  /** Last workload focus so Node → Workload mode can restore after clearing. */
+  const [stashedInvestigation, setStashedInvestigation] = useState<InvestigationFocus | null>(null);
+  /** Keep main panel painted while a node profile is in flight. */
+  const lastDetailRef = useRef<NodeProfileDetail | null>(null);
+
+  // Investigate CPU (and similar) should land on the requested tab, not Overview.
+  useEffect(() => {
+    setActiveTab(initialTab);
+  }, [initialTab, investigation?.startedAt]);
+
+  useEffect(() => {
+    if (investigation) {
+      setStashedInvestigation(investigation);
+    }
+  }, [investigation]);
+
+  const selectClusterNode = (nodeName: string) => {
+    const previous = selectedNode ?? investigation?.nodeName;
+    const switching =
+      Boolean(previous) &&
+      previous !== nodeName &&
+      previous?.split(".")[0] !== nodeName.split(".")[0];
+
+    userPickedNodeRef.current = true;
+    setSelectedNode(nodeName);
+    setInvestigationTarget(null);
+    setFlameCommand(null);
+    setFlamePaused(false);
+    lastDetailRef.current = null;
+
+    // Switching nodes always lands on Overview for that node — not the prior node's tab.
+    if (switching) {
+      setActiveTab("overview");
+    }
+
+    void prefetchProfileSnapshot(nodeName).catch(() => undefined);
+  };
+
+  const scrollToProfilerSelection = () => {
+    // Related views are often clicked while scrolled down the investigation rail —
+    // bring the tab strip + workspace into view so the switched surface is obvious.
+    requestAnimationFrame(() => {
+      profilerTabsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  };
+
+  const navigateProfiler = (target: "memory" | "network" | "events" | "profiling") => {
+    if (target === "memory") {
+      setActiveTab("memory");
+    } else if (target === "network") {
+      setActiveTab("network");
+    } else if (target === "events") {
+      setActiveTab("timeline");
+    } else {
+      setActiveTab("cpu");
+    }
+    scrollToProfilerSelection();
+  };
+
+  const dispatchFlameCommand = (step: InvestigationNextStep) => {
+    if (step.action === "navigate" && step.nav) {
+      navigateProfiler(step.nav);
+      return;
+    }
+    // Focus / kernel / userspace actions need the CPU flame mounted.
+    if (activeTab !== "overview" && activeTab !== "cpu") {
+      setActiveTab("cpu");
+      scrollToProfilerSelection();
+    }
+    setFlameCommand(step);
+    setFlameCommandSeq((n) => n + 1);
+  };
+
+  const handleExitToNode = () => {
+    if (investigation) {
+      setStashedInvestigation(investigation);
+    }
+    onExitInvestigation?.();
+    setInvestigationTarget(null);
+  };
+
+  const handleClimb = (level: InvestigationLevel) => {
+    // Workload mode only makes sense once an investigation was started (or stashed).
+    if (!investigation) {
+      if (stashedInvestigation) {
+        onInvestigationChange?.(climbInvestigation(stashedInvestigation, "workload"));
+      }
+      return;
+    }
+    onInvestigationChange?.(climbInvestigation(investigation, level));
+  };
+
+  const handleSelectTarget = (target: InvestigationTarget) => {
+    setInvestigationTarget(target);
+    if (!investigation || !onInvestigationChange) {
+      return;
+    }
+    if (target.kind === "pod") {
+      onInvestigationChange(drillToPod(investigation, target.pod));
+      return;
+    }
+    if (target.kind === "process") {
+      onInvestigationChange(
+        drillToProcess(investigation, target.pid, target.name, target.pod),
+      );
+    }
+  };
+
+  // Reset manual node override whenever the investigation target changes.
+  useEffect(() => {
+    userPickedNodeRef.current = false;
+    if (investigation?.nodeName) {
+      setSelectedNode(investigation.nodeName);
+    }
+  }, [investigation?.namespace, investigation?.name, investigation?.nodeName]);
+
+  // Fetch for the investigated node as soon as we know it (pre-resolved or user-selected).
+  // const { profile, loading, error } = useNodeProfile(connected, selectedNode, { paused: flamePaused });
+  const profileNode = selectedNode ?? investigation?.nodeName;
+  const { profile, loading, error } = useNodeProfile(connected, profileNode, {
     paused: flamePaused,
   });
 
-  const activeNode = selectedNode ?? profile.selected?.name ?? profile.nodes[0]?.name;
-  // const activeNode = profile.selected?.name ?? selectedNode ?? profile.nodes[0]?.name;
-  const detail = profile.selected;
+  const resolvedNode = useMemo(
+    () =>
+      investigation
+        ? resolveInvestigationNode(investigation, profile.podPlacements, profile.nodes)
+        : undefined,
+    [investigation, profile.podPlacements, profile.nodes],
+  );
+
+  // Force-select the scheduled node once placements arrive (e.g. traffic-gen → k8s-w2).
+  useLayoutEffect(() => {
+    if (!investigation || userPickedNodeRef.current) {
+      return;
+    }
+    const target = investigation.nodeName ?? resolvedNode;
+    if (!target || selectedNode === target) {
+      return;
+    }
+    setSelectedNode(target);
+  }, [investigation, investigation?.nodeName, resolvedNode, selectedNode]);
+
+  // const activeNode = selectedNode ?? profile.selected?.name ?? profile.nodes[0]?.name;
+  const activeNode =
+    selectedNode ??
+    investigation?.nodeName ??
+    resolvedNode ??
+    profile.selected?.name ??
+    profile.nodes[0]?.name;
+  // const detail = profile.selected;
+  const detailMatchesActive = (name?: string) => {
+    if (!name || !activeNode) {
+      return Boolean(name);
+    }
+    return name === activeNode || name.split(".")[0] === activeNode.split(".")[0];
+  };
+  if (profile.selected && detailMatchesActive(profile.selected.name)) {
+    lastDetailRef.current = normalizeProfileDetail(profile.selected);
+  } else if (activeNode && lastDetailRef.current && !detailMatchesActive(lastDetailRef.current.name)) {
+    // Drop held detail from a different node (was showing k8s-cp while on k8s-w3).
+    lastDetailRef.current = null;
+  }
+  const detail =
+    profile.selected && detailMatchesActive(profile.selected.name)
+      ? normalizeProfileDetail(profile.selected)
+      : lastDetailRef.current && detailMatchesActive(lastDetailRef.current.name)
+        ? lastDetailRef.current
+        : null;
+  const detailStale = Boolean(
+    detail && (!profile.selected || !detailMatchesActive(profile.selected.name)),
+  );
   const selectedStackLabel = investigationTarget?.kind === "stack" ? investigationTarget.label : undefined;
+  const frameCrumbLabel =
+    investigationTarget?.kind === "stack"
+      ? investigationTarget.label
+      : investigationTarget?.kind === "kernel"
+        ? investigationTarget.function
+        : undefined;
+  const focusLevel = investigation ? investigationLevel(investigation) : "workload";
 
   const scopedPods = useMemo(() => {
     if (!detail) {
       return [];
     }
-    if (!namespace || namespace === "all") {
-      return detail.topPods;
+    let pods =
+      !namespace || namespace === "all"
+        ? detail.topPods ?? []
+        : (detail.topPods ?? []).filter((pod) => pod.namespace === namespace);
+    if (investigation?.name) {
+      pods = pods.filter((pod) =>
+        podMatchesInvestigation(pod.pod, pod.namespace, investigation),
+      );
+      if ((focusLevel === "pod" || focusLevel === "process") && investigation.pod) {
+        pods = pods.filter((pod) => pod.pod === investigation.pod);
+      }
     }
-    return detail.topPods.filter((pod) => pod.namespace === namespace);
-  }, [detail, namespace]);
+    return pods;
+  }, [detail, namespace, investigation, focusLevel]);
 
   const scopedContainers = useMemo(() => {
     if (!detail) {
       return [];
     }
     const containers = detail.topContainers ?? [];
-    if (!namespace || namespace === "all") {
-      return containers;
+    let scoped =
+      !namespace || namespace === "all"
+        ? containers
+        : containers.filter((container) => container.namespace === namespace);
+    if (investigation?.name) {
+      scoped = scoped.filter((container) =>
+        podMatchesInvestigation(container.pod, container.namespace, investigation),
+      );
+      if ((focusLevel === "pod" || focusLevel === "process") && investigation.pod) {
+        scoped = scoped.filter((container) => container.pod === investigation.pod);
+      }
     }
-    return containers.filter((container) => container.namespace === namespace);
-  }, [detail, namespace]);
+    return scoped;
+  }, [detail, namespace, investigation, focusLevel]);
 
   const scopedProcesses = useMemo(() => {
     if (!detail) {
       return [];
     }
-    if (!namespace || namespace === "all") {
-      return detail.topProcesses;
+    let procs =
+      !namespace || namespace === "all"
+        ? detail.topProcesses ?? []
+        : (detail.topProcesses ?? []).filter((proc) => proc.namespace === namespace);
+    if (investigation?.name) {
+      procs = procs.filter(
+        (proc) =>
+          !proc.pod ||
+          podMatchesInvestigation(proc.pod, proc.namespace, investigation),
+      );
+      if ((focusLevel === "pod" || focusLevel === "process") && investigation.pod) {
+        procs = procs.filter((proc) => proc.pod === investigation.pod);
+      }
+      if (focusLevel === "process" && investigation.pid !== undefined) {
+        procs = procs.filter((proc) => proc.pid === investigation.pid);
+      }
     }
-    return detail.topProcesses.filter((proc) => proc.namespace === namespace);
-  }, [detail, namespace]);
+    return procs;
+  }, [detail, namespace, investigation, focusLevel]);
+
+  const workloadNames = useMemo(() => {
+    if (!investigation) {
+      return [] as string[];
+    }
+    const names = new Set<string>([investigation.name, ...(investigation.memberPods ?? [])]);
+    if (investigation.pod) {
+      names.add(investigation.pod);
+    }
+    return [...names];
+  }, [investigation]);
 
   const scopedCpuStack = useMemo(() => {
     if (!detail) {
       return [];
     }
-    return scopeCpuFrames(detail.cpuStack, namespace);
-  }, [detail, namespace]);
+    // return scopeCpuFrames(detail.cpuStack, namespace);
+    return scopeCpuFrames(detail.cpuStack ?? [], namespace, workloadNames, {
+      pod: focusLevel === "pod" || focusLevel === "process" ? investigation?.pod : undefined,
+      pid: focusLevel === "process" ? investigation?.pid : undefined,
+      processName: focusLevel === "process" ? investigation?.processName : undefined,
+    });
+  }, [detail, namespace, workloadNames, investigation, focusLevel]);
 
-  const scopedNetworkStack = useMemo(() => {
+  // Previous: network flame only cut by namespace — still showed the whole node's traffic.
+  // const scopedNetworkStack = useMemo(() => {
+  //   if (!detail) {
+  //     return [];
+  //   }
+  //   if (!namespace || namespace === "all") {
+  //     return detail.stack;
+  //   }
+  //   return detail.stack.filter(
+  //     (frame) => frame.depth <= 1 || frame.namespace === namespace,
+  //   );
+  // }, [detail, namespace]);
+  const workloadScoped = useMemo(() => {
     if (!detail) {
-      return [];
+      return null;
     }
-    if (!namespace || namespace === "all") {
-      return detail.stack;
-    }
-    return detail.stack.filter(
-      (frame) => frame.depth <= 1 || frame.namespace === namespace,
-    );
-  }, [detail, namespace]);
+    return filterDetailForWorkloadFocus(detail, investigation);
+  }, [detail, investigation]);
+
+  const scopedNetworkStack = workloadScoped?.stack ?? [];
+  const scopedNetworkLog = workloadScoped?.log ?? [];
+  const scopedTimeline = workloadScoped?.timeline ?? [];
+  const scopedNetworkMetrics = workloadScoped?.networkMetrics ?? [];
 
   const subtitle = useMemo(() => {
     if (!connected) {
       return "Connect a cluster to investigate node kernel behavior";
     }
+    if (investigation) {
+      const nodeHint = selectedNode ? ` on ${selectedNode}` : "";
+      const levelHint =
+        focusLevel === "process" && investigation.pid !== undefined
+          ? ` · PID ${investigation.pid}`
+          : focusLevel === "pod" && investigation.pod
+            ? ` · pod ${investigation.pod}`
+            : "";
+      // return `Investigating ${investigationLabel(investigation)}${nodeHint} — CPU filtered to this workload`;
+      return `Workload investigation · ${investigationLabel(investigation)}${levelHint}${nodeHint} — CPU, memory, network & timeline scoped to this workload`;
+    }
     if (loading && profile.nodes.length === 0) {
       return "Sampling node pressure, consumers, and inferred hot paths…";
     }
-    return "Kernel investigation — hotspots, consumers, pressure, and timeline";
-  }, [connected, loading, profile.nodes.length]);
+    return "Node investigation — hotspots, consumers, pressure, and timeline";
+  }, [connected, loading, profile.nodes.length, investigation, selectedNode, focusLevel]);
+
+  const insightDetail = useMemo(() => {
+    if (!detail || !investigation) {
+      return detail;
+    }
+    return {
+      ...detail,
+      topPods: scopedPods,
+      topProcesses: scopedProcesses.length > 0 ? scopedProcesses : detail.topProcesses,
+      topContainers: scopedContainers,
+    };
+  }, [detail, investigation, scopedPods, scopedProcesses, scopedContainers]);
 
   const tabs: Array<{ id: ProfilerTab; label: string }> = [
     { id: "overview", label: "Overview" },
@@ -571,7 +972,9 @@ export function ProfilingDashboard({
   return (
     <div className="profile-page">
       <PageHeader
-        title="Profiler"
+        // title="Profiler"
+        // title={investigation ? `Profiler · ${investigationLabel(investigation)}` : "Profiler"}
+        title={investigation ? `Profiler · ${investigationLabel(investigation)}` : "Profiler"}
         subtitle={subtitle}
         clusterName={clusterName}
         namespace={namespace}
@@ -579,6 +982,15 @@ export function ProfilingDashboard({
         onNamespaceChange={onNamespaceChange}
         connected={connected}
         showWindow
+      />
+
+      <InvestigationHierarchy
+        focus={investigation}
+        activeNode={activeNode}
+        frameLabel={frameCrumbLabel}
+        onExitToNode={handleExitToNode}
+        onClimb={handleClimb}
+        canEnterWorkload={Boolean(stashedInvestigation)}
       />
 
       {error ? <div className="profile-error panel">{error}</div> : null}
@@ -610,14 +1022,12 @@ export function ProfilingDashboard({
                       if (event.button !== 0) {
                         return;
                       }
-                      setSelectedNode(node.name);
-                      setInvestigationTarget(null);
+                      selectClusterNode(node.name);
                     }}
                     onClick={(event) => {
                       // Keep click for keyboard / accessibility; pointerdown already selected.
                       event.preventDefault();
-                      setSelectedNode(node.name);
-                      setInvestigationTarget(null);
+                      selectClusterNode(node.name);
                     }}
                   >
                     <span className="profile-node-row">
@@ -649,6 +1059,9 @@ export function ProfilingDashboard({
                     <span className={`profile-badge profile-badge-${detail.health}`}>
                       {healthLabel(detail.health)}
                     </span>
+                    {loading || detailStale || (activeNode && detail.name !== activeNode) ? (
+                      <span className="profile-toolbar-updating">Updating samples…</span>
+                    ) : null}
                     {(() => {
                       const degrade = nodeDegradeReason({
                         health: detail.health,
@@ -656,8 +1069,8 @@ export function ProfilingDashboard({
                         memoryUsedMb: detail.memoryUsedMb,
                         memoryTotalMb: detail.memoryTotalMb,
                         psi: detail.psi,
-                        psiCpuLevel: detail.psi.cpuLevel,
-                        psiMemoryLevel: detail.psi.memoryLevel,
+                        psiCpuLevel: detail.psi?.cpuLevel,
+                        psiMemoryLevel: detail.psi?.memoryLevel,
                       });
                       if (!degrade) {
                         return null;
@@ -671,13 +1084,18 @@ export function ProfilingDashboard({
                     })()}
                     <span className="profile-breadcrumb">
                       {detail.name}
-                      {investigationTarget?.kind === "pod"
-                        ? ` › ${investigationTarget.namespace}/${investigationTarget.pod}`
-                        : investigationTarget?.kind === "kernel"
-                          ? ` › ${investigationTarget.function}`
-                          : investigationTarget?.kind === "stack"
-                            ? ` › ${investigationTarget.label}`
-                            : ""}
+                      {investigation
+                        ? ` › ${investigationLabel(investigation)}`
+                        : ""}
+                      {investigation?.pod ? ` › ${investigation.pod}` : ""}
+                      {investigation?.pid !== undefined
+                        ? ` › PID ${investigation.pid}`
+                        : ""}
+                      {investigationTarget?.kind === "kernel"
+                        ? ` › ${investigationTarget.function}`
+                        : investigationTarget?.kind === "stack"
+                          ? ` › ${investigationTarget.label}`
+                          : ""}
                     </span>
                   </div>
                   <div className="profile-toolbar-right">
@@ -688,7 +1106,7 @@ export function ProfilingDashboard({
                   </div>
                 </div>
 
-                <div className="profile-tabs" role="tablist">
+                <div className="profile-tabs" role="tablist" ref={profilerTabsRef}>
                   {tabs.map((tab) => (
                     <button
                       key={tab.id}
@@ -705,60 +1123,82 @@ export function ProfilingDashboard({
 
                 {activeTab === "overview" ? (
                   <>
-                    <InsightCards detail={detail} onSelect={setInvestigationTarget} />
+                    <InsightCards detail={insightDetail ?? detail} onSelect={handleSelectTarget} />
                     <TraceFlameStack
                       frames={scopedCpuStack}
                       label={cpuStackLabel(detail.stackSource)}
                       variant="cpu"
-                      onSelect={setInvestigationTarget}
+                      onSelect={handleSelectTarget}
                       selectedLabel={selectedStackLabel}
                       sampleSeconds={detail.sampleSeconds}
                       sampleHz={20}
                       nodeName={detail.name}
                       paused={flamePaused}
                       onPausedChange={setFlamePaused}
-                      processes={scopedProcesses}
+                      processes={detail.topProcesses}
+                      // processes={scopedProcesses} — scoped list can drop ownership metadata for other namespaces
+                      onNavigate={navigateProfiler}
+                      command={flameCommand}
+                      commandSeq={flameCommandSeq}
+                      onCommandHandled={() => setFlameCommand(null)}
                     />
-                    <TimelineList events={detail.timeline.slice(0, 5)} />
+                    {/* <TimelineList events={detail.timeline.slice(0, 5)} /> */}
+                    <TimelineList
+                      events={(investigation ? scopedTimeline : detail.timeline).slice(0, 5)}
+                      emptyHint={
+                        investigation
+                          ? `No timeline events involving ${investigationLabel(investigation)} in this sample.`
+                          : undefined
+                      }
+                    />
                   </>
                 ) : null}
 
                 {activeTab === "cpu" ? (
                   <>
+                    <InsightCards detail={insightDetail ?? detail} onSelect={handleSelectTarget} />
                     <TraceFlameStack
                       frames={scopedCpuStack}
                       label={cpuStackLabel(detail.stackSource)}
                       variant="cpu"
-                      onSelect={setInvestigationTarget}
+                      onSelect={handleSelectTarget}
                       selectedLabel={selectedStackLabel}
                       sampleSeconds={detail.sampleSeconds}
                       sampleHz={20}
                       nodeName={detail.name}
                       paused={flamePaused}
                       onPausedChange={setFlamePaused}
-                      processes={scopedProcesses}
+                      processes={detail.topProcesses}
+                      // processes={scopedProcesses} — scoped list can drop ownership metadata for other namespaces
+                      onNavigate={navigateProfiler}
+                      command={flameCommand}
+                      commandSeq={flameCommandSeq}
+                      onCommandHandled={() => setFlameCommand(null)}
                     />
+                    {/* Hotspots moved beside the flamegraph (Top hotspots rail).
                     <HotspotList
                       hotspots={detail.kernelHotspots}
-                      onSelect={setInvestigationTarget}
+                      onSelect={handleSelectTarget}
                       selected={investigationTarget}
                     />
-                    <div className="profile-overview-card profile-overview-wide">
-                      {/* <span className="profile-panel-label">Top pods</span> */}
-                      <span className="profile-panel-label">Top workloads</span>
-                      <PodTable
-                        pods={scopedPods}
-                        onSelect={setInvestigationTarget}
-                        selected={investigationTarget}
-                      />
-                      {/* <span className="profile-panel-label">Processes</span> */}
-                      <span className="profile-panel-label">Top processes</span>
-                      <ProcessTable
-                        processes={scopedProcesses}
-                        onSelect={setInvestigationTarget}
-                        selected={investigationTarget}
-                      />
-                    </div>
+                    */}
+                    <details className="profile-advanced-block">
+                      <summary>Workloads &amp; processes</summary>
+                      <div className="profile-overview-card profile-overview-wide">
+                        <span className="profile-panel-label">Top workloads</span>
+                        <PodTable
+                          pods={scopedPods}
+                          onSelect={handleSelectTarget}
+                          selected={investigationTarget}
+                        />
+                        <span className="profile-panel-label">Top processes</span>
+                        <ProcessTable
+                          processes={investigation ? scopedProcesses : detail.topProcesses}
+                          onSelect={handleSelectTarget}
+                          selected={investigationTarget}
+                        />
+                      </div>
+                    </details>
                   </>
                 ) : null}
 
@@ -769,7 +1209,7 @@ export function ProfilingDashboard({
                     containers={scopedContainers}
                     processes={scopedProcesses}
                     namespace={namespace}
-                    onInvestigate={setInvestigationTarget}
+                    onInvestigate={handleSelectTarget}
                     investigationTarget={investigationTarget}
                   />
                 ) : null}
@@ -777,7 +1217,11 @@ export function ProfilingDashboard({
                 {activeTab === "network" ? (
                   <>
                     <div className="profile-metrics">
+                      {/* Previous: node-wide metrics while investigating a single workload.
                       {networkMetricsOnly(detail.metrics).map((metric: ProfileMetric) => (
+                      */}
+                      {(investigation ? scopedNetworkMetrics : networkMetricsOnly(detail.metrics)).map(
+                        (metric: ProfileMetric) => (
                         <div key={metric.label} className="profile-metric">
                           <span className="profile-metric-label">{metric.label}</span>
                           <span className={`profile-metric-value profile-metric-${metric.tone}`}>
@@ -787,12 +1231,45 @@ export function ProfilingDashboard({
                         </div>
                       ))}
                     </div>
-                    <TraceFlameStack frames={scopedNetworkStack} label="Network flame graph" variant="network" />
-                    <NetworkLog lines={detail.log} />
+                    {investigation && scopedNetworkStack.every((frame) => frame.depth === 0) ? (
+                      <div className="profile-log-empty">
+                        No network traffic involving {investigationLabel(investigation)} on this node
+                        in the current sample.
+                      </div>
+                    ) : (
+                      <TraceFlameStack
+                        frames={scopedNetworkStack}
+                        label={
+                          investigation
+                            ? `Network · ${investigationLabel(investigation)}`
+                            : "Network flame graph"
+                        }
+                        variant="network"
+                      />
+                    )}
+                    {/* <NetworkLog lines={detail.log} /> */}
+                    <NetworkLog
+                      lines={investigation ? scopedNetworkLog : detail.log}
+                      emptyHint={
+                        investigation
+                          ? `No network log lines involving ${investigationLabel(investigation)} in this sample.`
+                          : undefined
+                      }
+                    />
                   </>
                 ) : null}
 
-                {activeTab === "timeline" ? <TimelineList events={detail.timeline} /> : null}
+                {/* {activeTab === "timeline" ? <TimelineList events={detail.timeline} /> : null} */}
+                {activeTab === "timeline" ? (
+                  <TimelineList
+                    events={investigation ? scopedTimeline : detail.timeline}
+                    emptyHint={
+                      investigation
+                        ? `No timeline events involving ${investigationLabel(investigation)} in this sample.`
+                        : undefined
+                    }
+                  />
+                ) : null}
               </>
             ) : (
               <div className="profile-empty-inner">
@@ -805,6 +1282,9 @@ export function ProfilingDashboard({
             <InvestigationPanel
               detail={detail}
               target={investigationTarget}
+              clusterName={clusterName}
+              onNavigate={navigateProfiler}
+              onCommand={dispatchFlameCommand}
               onClear={() => {
                 setInvestigationTarget(null);
                 setFlamePaused(false);

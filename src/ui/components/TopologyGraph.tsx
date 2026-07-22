@@ -12,6 +12,11 @@ import {
 } from "../../core/network/graph-model";
 import { protocolStroke } from "../../core/network/protocol-class";
 import type { NavId, NavPage } from "./AppShell";
+import {
+  INVESTIGATE_ACTIONS,
+  type InvestigationFocus,
+  type StartInvestigation,
+} from "../investigation/types";
 
 interface TopologyGraphProps {
   layout: GraphLayout;
@@ -24,7 +29,12 @@ interface TopologyGraphProps {
   onLodChange?: (lod: GraphLod) => void;
   showLegend?: boolean;
   showInspectPanel?: boolean;
+  // onNavigate?: (nav: NavId, page: NavPage) => void;
+  /** Navigate without investigation context (legacy). */
   onNavigate?: (nav: NavId, page: NavPage) => void;
+  /** Start a persistent investigation and jump to a surface. */
+  onStartInvestigation?: StartInvestigation;
+  startedFrom?: string;
 }
 
 const HEALTH_STROKE: Record<GraphEdgeHealth, string> = {
@@ -93,6 +103,43 @@ function detailLevel(zoom: number, lod: GraphLod): "minimal" | "compact" | "full
   return "full";
 }
 
+/** Compact hop label: protocol · throughput · latency (and health hint). */
+function hopHealthHint(edge: Pick<GraphEdgeLayout, "health" | "drops" | "retransmits" | "latencyP95Ms">): string | null {
+  if (edge.health === "bad") {
+    return edge.drops > 0 ? "drops" : "error";
+  }
+  if (edge.health !== "warn") {
+    return null;
+  }
+  // Retransmits / retries are not the same as high latency — don't call 1ms "slow".
+  if (edge.retransmits > 0) {
+    return "retrans";
+  }
+  return "slow";
+}
+
+function hopEdgeLabel(edge: GraphEdgeLayout, full: boolean): string {
+  const bits: string[] = [edge.appClassLabel];
+  if (edge.requestsPerSec > 0) {
+    bits.push(`${edge.requestsPerSec}/s`);
+  } else if (edge.flowCount > 0) {
+    bits.push(`${edge.flowCount} flows`);
+  }
+  if (edge.latencyP95Ms !== undefined) {
+    bits.push(`p95 ${Math.round(edge.latencyP95Ms)}ms`);
+  } else if (full && edge.flowCount > 0) {
+    bits.push("live");
+  }
+  const hint = hopHealthHint(edge);
+  if (hint) {
+    bits.push(hint);
+  }
+  if (full && edge.bundledCount > 1) {
+    bits.push(`${edge.bundledCount} routes`);
+  }
+  return bits.join(" · ");
+}
+
 export function TopologyGraph({
   layout,
   connected,
@@ -105,12 +152,54 @@ export function TopologyGraph({
   showLegend = false,
   showInspectPanel = true,
   onNavigate,
+  onStartInvestigation,
+  startedFrom = "Service Map",
 }: TopologyGraphProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
   const [hoverPoint, setHoverPoint] = useState<{ x: number; y: number } | null>(null);
+  const hoverClearRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const cancelHoverClear = useCallback(() => {
+    if (hoverClearRef.current) {
+      clearTimeout(hoverClearRef.current);
+      hoverClearRef.current = null;
+    }
+  }, []);
+
+  const scheduleHoverClear = useCallback(() => {
+    cancelHoverClear();
+    hoverClearRef.current = setTimeout(() => {
+      setHoveredEdgeId(null);
+      setHoverPoint(null);
+      hoverClearRef.current = null;
+    }, 80);
+  }, [cancelHoverClear]);
+
+  const showEdgeHover = useCallback(
+    (edgeId: string, clientX: number, clientY: number) => {
+      cancelHoverClear();
+      setHoveredEdgeId(edgeId);
+      const viewport = viewportRef.current?.getBoundingClientRect();
+      if (viewport) {
+        setHoverPoint({
+          x: clientX - viewport.left,
+          y: clientY - viewport.top,
+        });
+      }
+    },
+    [cancelHoverClear],
+  );
+
+  useEffect(() => {
+    return () => {
+      if (hoverClearRef.current) {
+        clearTimeout(hoverClearRef.current);
+      }
+    };
+  }, []);
   const [expandedNodeIds, setExpandedNodeIds] = useState<Set<string>>(() => new Set());
   const [internalLod, setInternalLod] = useState<GraphLod>(layout.lod ?? "service");
   const dragRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
@@ -176,6 +265,10 @@ export function TopologyGraph({
     [layout.edges, hoveredEdgeId],
   );
 
+  // Hop metrics card is hover-only — clears when the pointer leaves the edge/card.
+  const focusEdge = hoveredEdge;
+  const focusEdgePoint = hoverPoint;
+
   const nodeDependencies = useMemo(() => {
     if (!selectedNode) {
       return [];
@@ -203,7 +296,8 @@ export function TopologyGraph({
     if (!viewport || layout.width <= 0 || layout.height <= 0) {
       return;
     }
-    const panelReserve = selectedNode && showInspectPanel ? 300 : 0;
+    // Use selectedNodeId (stable) — not selectedNode object identity, which changes every live layout rebuild.
+    const panelReserve = selectedNodeId && showInspectPanel ? 300 : 0;
     const pad = 36;
     const scale = Math.min(
       (viewport.clientWidth - pad - panelReserve) / layout.width,
@@ -216,7 +310,7 @@ export function TopologyGraph({
       x: (viewport.clientWidth - panelReserve - layout.width * nextZoom) / 2,
       y: (viewport.clientHeight - layout.height * nextZoom) / 2,
     });
-  }, [layout.width, layout.height, selectedNode, showInspectPanel]);
+  }, [layout.width, layout.height, selectedNodeId, showInspectPanel]);
 
   useEffect(() => {
     fitToView();
@@ -233,6 +327,16 @@ export function TopologyGraph({
   }, [fitToView]);
 
   const handleWheel = (event: WheelEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement | null;
+    // Inspect / chrome scroll must not zoom or pan the map underneath.
+    if (
+      target?.closest(".graph-inspect") ||
+      target?.closest(".graph-edge-card") ||
+      target?.closest(".graph-lod-bar") ||
+      target?.closest(".graph-controls")
+    ) {
+      return;
+    }
     event.preventDefault();
     const viewport = viewportRef.current;
     if (!viewport) {
@@ -386,53 +490,67 @@ export function TopologyGraph({
         </div>
       ) : null}
 
-      {hoveredEdge && hoverPoint ? (
+      {focusEdge && focusEdgePoint ? (
         <div
-          className={`graph-edge-card health-${hoveredEdge.health} proto-${hoveredEdge.appClass}`}
-          style={{ left: hoverPoint.x + 16, top: hoverPoint.y + 12 }}
+          className={`graph-edge-card is-interactive health-${focusEdge.health} proto-${focusEdge.appClass}`}
+          style={{ left: focusEdgePoint.x + 16, top: focusEdgePoint.y + 12 }}
+          onMouseEnter={cancelHoverClear}
+          onMouseLeave={scheduleHoverClear}
         >
-          <div className="graph-edge-card-route">{hoveredEdge.routeName}</div>
+          <div className="graph-edge-card-route">{focusEdge.routeName}</div>
+          <div className="graph-edge-card-hop">
+            hop · {focusEdge.requestsPerSec}/s ·{" "}
+            {focusEdge.latencyP95Ms !== undefined
+              ? `p95 ${focusEdge.latencyP95Ms}ms`
+              : "p95 —"}
+            {(() => {
+              // Previous: any warn showed "slow" — mislabeled 1ms hops that only had retransmits.
+              // {focusEdge.health === "bad" ? " · error" : focusEdge.health === "warn" ? " · slow" : ""}
+              const hint = hopHealthHint(focusEdge);
+              return hint ? ` · ${hint}` : "";
+            })()}
+          </div>
           <dl className="graph-edge-card-grid">
             <div>
               <dt>Protocol</dt>
-              <dd>{hoveredEdge.appClassLabel}</dd>
+              <dd>{focusEdge.appClassLabel}</dd>
             </div>
             <div>
               <dt>Port</dt>
               <dd>
-                {hoveredEdge.ports.length > 1
-                  ? hoveredEdge.ports.join(", ")
-                  : `${hoveredEdge.protocol}:${hoveredEdge.port}`}
+                {focusEdge.ports.length > 1
+                  ? focusEdge.ports.join(", ")
+                  : `${focusEdge.protocol}:${focusEdge.port}`}
               </dd>
             </div>
             <div>
               <dt>P50</dt>
-              <dd>{hoveredEdge.latencyP50Ms !== undefined ? `${hoveredEdge.latencyP50Ms}ms` : "—"}</dd>
+              <dd>{focusEdge.latencyP50Ms !== undefined ? `${focusEdge.latencyP50Ms}ms` : "—"}</dd>
             </div>
             <div>
               <dt>P95</dt>
-              <dd>{hoveredEdge.latencyP95Ms !== undefined ? `${hoveredEdge.latencyP95Ms}ms` : "—"}</dd>
+              <dd>{focusEdge.latencyP95Ms !== undefined ? `${focusEdge.latencyP95Ms}ms` : "—"}</dd>
             </div>
             <div>
               <dt>P99</dt>
-              <dd>{hoveredEdge.latencyP99Ms !== undefined ? `${hoveredEdge.latencyP99Ms}ms` : "—"}</dd>
+              <dd>{focusEdge.latencyP99Ms !== undefined ? `${focusEdge.latencyP99Ms}ms` : "—"}</dd>
             </div>
             <div>
               <dt>Flows/s</dt>
-              <dd>{hoveredEdge.requestsPerSec}</dd>
+              <dd>{focusEdge.requestsPerSec}</dd>
             </div>
             <div>
               <dt>Retransmits</dt>
-              <dd>{hoveredEdge.retransmits}</dd>
+              <dd>{focusEdge.retransmits}</dd>
             </div>
             <div>
               <dt>Drops</dt>
-              <dd>{hoveredEdge.drops}</dd>
+              <dd>{focusEdge.drops}</dd>
             </div>
-            {hoveredEdge.bundledCount > 1 ? (
+            {focusEdge.bundledCount > 1 ? (
               <div>
                 <dt>Bundled</dt>
-                <dd>{hoveredEdge.bundledCount} routes</dd>
+                <dd>{focusEdge.bundledCount} routes</dd>
               </div>
             ) : null}
           </dl>
@@ -440,7 +558,11 @@ export function TopologyGraph({
       ) : null}
 
       {selectedNode && showInspectPanel ? (
-        <aside className="graph-inspect">
+        <aside
+          className="graph-inspect"
+          onWheel={(event) => event.stopPropagation()}
+          onMouseDown={(event) => event.stopPropagation()}
+        >
           <div className="graph-inspect-head">
             <div>
               <div className="graph-inspect-kind">{selectedNode.kind}</div>
@@ -523,10 +645,11 @@ export function TopologyGraph({
               </p>
             )}
           </div>
-          {onNavigate ? (
+          {onStartInvestigation || onNavigate ? (
             <div className="graph-inspect-section">
               <div className="graph-inspect-label">Investigate</div>
               <div className="graph-inspect-actions">
+                {/* Previous: jumped pages without carrying service context.
                 <button type="button" onClick={() => onNavigate("profiling", "profiling")}>
                   Open Profile
                 </button>
@@ -542,6 +665,36 @@ export function TopologyGraph({
                 <button type="button" onClick={() => onNavigate("network", "network-map")}>
                   Open Map
                 </button>
+                */}
+                {INVESTIGATE_ACTIONS.map((action) => (
+                  <button
+                    key={action.page}
+                    type="button"
+                    onClick={() => {
+                      const focus: Omit<InvestigationFocus, "startedAt" | "clusterName"> = {
+                        kind:
+                          selectedNode.kind === "Pod" ||
+                          selectedNode.kind === "Service" ||
+                          selectedNode.kind === "Workload" ||
+                          selectedNode.kind === "Namespace"
+                            ? selectedNode.kind
+                            : "Service",
+                        name: selectedNode.name,
+                        namespace: selectedNode.namespace,
+                        memberPods: selectedNode.memberPods.map((pod) => pod.name),
+                        startedFrom,
+                      };
+                      if (onStartInvestigation) {
+                        onStartInvestigation(focus, { nav: action.nav, page: action.page });
+                        return;
+                      }
+                      // Fallback if only legacy navigate is wired.
+                      onNavigate?.(action.nav, action.page);
+                    }}
+                  >
+                    {action.label}
+                  </button>
+                ))}
               </div>
             </div>
           ) : null}
@@ -629,27 +782,13 @@ export function TopologyGraph({
                   onSelectNode?.(null);
                 }}
                 onMouseEnter={(event) => {
-                  setHoveredEdgeId(edge.id);
-                  const viewport = viewportRef.current?.getBoundingClientRect();
-                  if (viewport) {
-                    setHoverPoint({
-                      x: event.clientX - viewport.left,
-                      y: event.clientY - viewport.top,
-                    });
-                  }
+                  showEdgeHover(edge.id, event.clientX, event.clientY);
                 }}
                 onMouseMove={(event) => {
-                  const viewport = viewportRef.current?.getBoundingClientRect();
-                  if (viewport) {
-                    setHoverPoint({
-                      x: event.clientX - viewport.left,
-                      y: event.clientY - viewport.top,
-                    });
-                  }
+                  showEdgeHover(edge.id, event.clientX, event.clientY);
                 }}
                 onMouseLeave={() => {
-                  setHoveredEdgeId(null);
-                  setHoverPoint(null);
+                  scheduleHoverClear();
                 }}
               >
                 <path
@@ -657,7 +796,7 @@ export function TopologyGraph({
                   className="graph-edge-hit"
                   fill="none"
                   stroke="transparent"
-                  strokeWidth={14}
+                  strokeWidth={24}
                 />
                 <path
                   d={edge.path}
@@ -690,13 +829,14 @@ export function TopologyGraph({
                   <text
                     x={edge.labelX}
                     y={edge.labelY}
-                    className="graph-edge-label"
+                    className={`graph-edge-label is-hoverable${edge.health !== "ok" ? ` health-${edge.health}` : ""}`}
                     fill={stroke}
-                    opacity={dimmed ? 0.15 : 0.85}
+                    opacity={dimmed ? 0.15 : 0.9}
+                    onMouseEnter={(event) => {
+                      showEdgeHover(edge.id, event.clientX, event.clientY);
+                    }}
                   >
-                    {labelLod === "full"
-                      ? edge.label
-                      : edge.appClassLabel}
+                    {hopEdgeLabel(edge, labelLod === "full")}
                   </text>
                 ) : null}
               </g>

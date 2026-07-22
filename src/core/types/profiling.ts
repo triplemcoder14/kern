@@ -186,6 +186,14 @@ export interface NodeProfileDetail {
 export interface ProfileSnapshot {
   nodes: NodeProfileSummary[];
   selected?: NodeProfileDetail;
+  /** Cluster-wide pod → node map for investigation auto-select. */
+  podPlacements?: Array<{
+    namespace: string;
+    name: string;
+    nodeName: string;
+    /** Workload name from ownerReferences (Deployment / STS / DS). */
+    ownerWorkload?: string;
+  }>;
   updatedAt: string;
 }
 

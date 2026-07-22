@@ -95,6 +95,13 @@ interface K8sPodObject {
   metadata: {
     name: string;
     namespace?: string;
+    ownerReferences?: Array<{
+      apiVersion?: string;
+      kind?: string;
+      name?: string;
+      uid?: string;
+      controller?: boolean;
+    }>;
   };
   spec?: {
     nodeName?: string;
@@ -606,7 +613,15 @@ export class K8sApiClient {
   async listPodsOnNode(
     nodeName: string,
     namespace?: MonitorNamespaceScope,
-  ): Promise<Array<{ namespace: string; name: string; nodeName: string; memoryLimitMb?: number }>> {
+  ): Promise<
+    Array<{
+      namespace: string;
+      name: string;
+      nodeName: string;
+      memoryLimitMb?: number;
+      ownerWorkload?: string;
+    }>
+  > {
     const nsPath = this.namespacePath(namespace);
     const query = new URLSearchParams({
       fieldSelector: `spec.nodeName=${nodeName}`,
@@ -627,17 +642,23 @@ export class K8sApiClient {
         name: pod.metadata.name,
         nodeName: pod.spec?.nodeName ?? nodeName,
         memoryLimitMb: sumPodMemoryLimitMb(pod),
+        ownerWorkload: ownerWorkloadFromPod(pod),
       }))
       .filter((pod) => pod.name.length > 0);
   }
 
-  async listPodsOnNodes(namespace?: MonitorNamespaceScope): Promise<Array<{ namespace: string; name: string; nodeName: string }>> {
+  async listPodsOnNodes(
+    namespace?: MonitorNamespaceScope,
+  ): Promise<
+    Array<{ namespace: string; name: string; nodeName: string; ownerWorkload?: string }>
+  > {
     const pods = await this.listPods(namespace);
     return pods
       .map((pod) => ({
         namespace: pod.metadata.namespace ?? "default",
         name: pod.metadata.name,
         nodeName: pod.spec?.nodeName ?? "",
+        ownerWorkload: ownerWorkloadFromPod(pod),
       }))
       .filter((pod) => pod.nodeName.length > 0);
   }
@@ -775,6 +796,38 @@ function parseCapacityMemoryMi(value: string): number {
     return Number.parseInt(value, 10) * 1024;
   }
   return 0;
+}
+
+/** Strip ReplicaSet / pod hash suffixes to recover Deployment / STS / DS name. */
+function workloadBaseNameFromOwner(name: string): string {
+  const parts = name.split("-");
+  if (
+    parts.length >= 2 &&
+    /^[a-z0-9]{4,10}$/i.test(parts[parts.length - 1] ?? "")
+  ) {
+    return parts.slice(0, -1).join("-") || name;
+  }
+  return name;
+}
+
+function ownerWorkloadFromPod(pod: K8sPodObject): string | undefined {
+  const refs = pod.metadata.ownerReferences;
+  if (!refs || refs.length === 0) {
+    return undefined;
+  }
+  const controller = refs.find((ref) => ref.controller) ?? refs[0];
+  const kind = controller?.kind ?? "";
+  const ownerName = controller?.name?.trim() ?? "";
+  if (!ownerName) {
+    return undefined;
+  }
+  if (kind === "StatefulSet" || kind === "DaemonSet" || kind === "Job" || kind === "CronJob") {
+    return ownerName;
+  }
+  if (kind === "ReplicaSet") {
+    return workloadBaseNameFromOwner(ownerName);
+  }
+  return ownerName;
 }
 
 function sumPodMemoryLimitMb(pod: K8sPodObject): number | undefined {

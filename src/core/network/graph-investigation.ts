@@ -114,17 +114,20 @@ function endpointNodeId(endpoint: NetworkEndpoint): string | null {
 }
 
 function flowLatency(flow: NetworkFlow): number | undefined {
-  if (flow.latencyMs !== undefined) {
+  // Only real measurements — never invent latency from flow id hashes.
+  // Fake 4–93ms values made ~1ms postgres RTTs look like 8ms+ on the map.
+  if (flow.latencyMs !== undefined && flow.latencyMs >= 0) {
     return flow.latencyMs;
   }
-  if (flow.source !== "ebpf") {
-    return undefined;
-  }
-  let hash = 0;
-  for (let i = 0; i < flow.id.length; i += 1) {
-    hash = (hash * 31 + flow.id.charCodeAt(i)) | 0;
-  }
-  return (Math.abs(hash) % 90) + 4;
+  return undefined;
+  // if (flow.source !== "ebpf") {
+  //   return undefined;
+  // }
+  // let hash = 0;
+  // for (let i = 0; i < flow.id.length; i += 1) {
+  //   hash = (hash * 31 + flow.id.charCodeAt(i)) | 0;
+  // }
+  // return (Math.abs(hash) % 90) + 4;
 }
 
 function worstVerdict(current: FlowVerdict, next: FlowVerdict): FlowVerdict {
@@ -143,11 +146,22 @@ function edgeHealth(
   p95?: number,
   retransmits = 0,
   drops = 0,
+  appClass: ProtocolClass = "tcp",
 ): GraphEdgeHealth {
   if (verdict === "DROPPED" || verdict === "TIMEOUT" || drops > 0) {
     return "bad";
   }
-  if (verdict === "RETRY" || retransmits > 0 || (p95 !== undefined && p95 > 80)) {
+  // Latency "slow" thresholds are protocol-aware. A flat 80ms marked healthy
+  // DNS (often ~50–100ms to CoreDNS) as warn and made the map look alarming.
+  const slowP95Ms =
+    appClass === "dns"
+      ? 250
+      : appClass === "http" || appClass === "grpc"
+        ? 200
+        : appClass === "postgres" || appClass === "mysql" || appClass === "redis"
+          ? 100
+          : 150;
+  if (verdict === "RETRY" || retransmits > 0 || (p95 !== undefined && p95 > slowP95Ms)) {
     return "warn";
   }
   return "ok";
@@ -273,6 +287,102 @@ function resolveRollupId(
     return workloadId;
   }
   return rawId;
+}
+
+const WELL_KNOWN_PORTS: Record<number, ProtocolClass> = {
+  53: "dns",
+  80: "http",
+  443: "http",
+  8080: "http",
+  8443: "http",
+  50051: "grpc",
+  5432: "postgres",
+  3306: "mysql",
+  6379: "redis",
+  9092: "kafka",
+};
+
+const SERVER_NAME_PORT: Record<string, number> = {
+  postgres: 5432,
+  redis: 6379,
+  mysql: 3306,
+  mariadb: 3306,
+  kafka: 9092,
+  elasticsearch: 9200,
+  "kube-dns": 53,
+  coredns: 53,
+};
+
+function isWellKnownPort(port: number): boolean {
+  return WELL_KNOWN_PORTS[port] !== undefined;
+}
+
+function serverPortForName(name: string): number | undefined {
+  const key = name.trim().toLowerCase();
+  return SERVER_NAME_PORT[key];
+}
+
+function isLikelyServerName(name: string): boolean {
+  return serverPortForName(name) !== undefined;
+}
+
+/** Prefer client → server hops and the service port (5432), not ephemeral client ports. */
+function normalizeFlowHop(
+  from: string,
+  to: string,
+  fromName: string,
+  toName: string,
+  port: number,
+): { from: string; to: string; fromName: string; toName: string; port: number } {
+  const fromServer = isLikelyServerName(fromName);
+  const toServer = isLikelyServerName(toName);
+  const wellKnown = isWellKnownPort(port);
+
+  // postgres → catalog with ephemeral ports → flip to catalog → postgres:5432
+  if (fromServer && !toServer && !wellKnown) {
+    return {
+      from: to,
+      to: from,
+      fromName: toName,
+      toName: fromName,
+      port: serverPortForName(fromName) ?? port,
+    };
+  }
+
+  // catalog → postgres but port is ephemeral → keep direction, fix port
+  if (!fromServer && toServer && !wellKnown) {
+    return {
+      from,
+      to,
+      fromName,
+      toName,
+      port: serverPortForName(toName) ?? port,
+    };
+  }
+
+  // Server-side observation: postgres → catalog on 5432 (local well-known as "port")
+  if (fromServer && !toServer && wellKnown && serverPortForName(fromName) === port) {
+    return {
+      from: to,
+      to: from,
+      fromName: toName,
+      toName: fromName,
+      port,
+    };
+  }
+
+  return { from, to, fromName, toName, port };
+}
+
+function preferDisplayPorts(ports: number[], primary: number): number[] {
+  if (isWellKnownPort(primary)) {
+    return [primary];
+  }
+  const known = ports.filter((port) => isWellKnownPort(port));
+  if (known.length > 0) {
+    return known;
+  }
+  return ports.slice(0, 6);
 }
 
 function noteAppClass(agg: EdgeAgg, appClass: ProtocolClass, decoded: boolean): void {
@@ -516,12 +626,18 @@ function materializeEdges(
     const pull = nsCenters.get(toNode.namespace);
     const path = bezierPath(start.x, start.y, end.x, end.y, pull?.x, pull?.y);
     const stats = computeLatencyStats(agg.latencies);
-    const health = edgeHealth(agg.verdict, stats?.p95Ms, agg.retransmits, agg.drops);
+    const health = edgeHealth(agg.verdict, stats?.p95Ms, agg.retransmits, agg.drops, agg.appClass);
     const requestsPerSec = Number((agg.flowCount / WINDOW_SECONDS).toFixed(1));
     const appLabel = protocolClassLabel(agg.appClass, agg.appDecoded);
     const latencyLabel =
       stats?.p95Ms !== undefined ? `p95 ${stats.p95Ms}ms` : agg.flowCount > 0 ? "live" : "idle";
     const bundleHint = agg.bundledCount > 1 ? ` · ${agg.bundledCount} routes` : "";
+    const throughputLabel = `${requestsPerSec}/s`;
+    const displayPort =
+      preferDisplayPorts(agg.ports, agg.port)[0] ??
+      serverPortForName(toNode.name) ??
+      agg.port;
+    const displayPorts = preferDisplayPorts(agg.ports, displayPort);
 
     edges.push({
       id: agg.id,
@@ -529,8 +645,8 @@ function materializeEdges(
       to: agg.to,
       routeName: `${fromNode.name} → ${toNode.name}`,
       protocol: agg.protocol,
-      port: agg.port,
-      ports: agg.ports,
+      port: displayPort,
+      ports: displayPorts,
       protocols: agg.protocols,
       appClass: agg.appClass,
       appClassLabel: appLabel,
@@ -553,7 +669,7 @@ function materializeEdges(
       path,
       labelX: (start.x + end.x) / 2,
       labelY: (start.y + end.y) / 2 - 10,
-      label: `${appLabel} · ${latencyLabel}${bundleHint}`,
+      label: `${appLabel} · ${throughputLabel} · ${latencyLabel}${bundleHint}`,
     });
   }
   return edges;
@@ -574,21 +690,24 @@ function collectServiceEdges(
     if (!rawFrom || !rawTo || rawFrom === rawTo) {
       continue;
     }
-    const from = resolveRollupId(rawFrom, ownership, services);
-    const to = resolveRollupId(rawTo, ownership, services);
-    if (from === to) {
+    const rolledFrom = resolveRollupId(rawFrom, ownership, services);
+    const rolledTo = resolveRollupId(rawTo, ownership, services);
+    if (rolledFrom === rolledTo) {
       continue;
     }
-    const fromName = services.get(from)?.name ?? flow.src.name;
-    const toName = services.get(to)?.name ?? flow.dst.name;
+    const rawFromName = services.get(rolledFrom)?.name ?? flow.src.name;
+    const rawToName = services.get(rolledTo)?.name ?? flow.dst.name;
+    const hop = normalizeFlowHop(rolledFrom, rolledTo, rawFromName, rawToName, flow.port);
+    // Re-resolve protocol from the normalized server port (ephemeral → 5432 etc.).
+    const normalizedFlow = { ...flow, port: hop.port };
     ingestFlowEdge(
       edgeMap,
-      from,
-      to,
-      flow,
-      fromName,
-      toName,
-      `${flow.protocol}:${flow.port}`,
+      hop.from,
+      hop.to,
+      normalizedFlow,
+      hop.fromName,
+      hop.toName,
+      `${flow.protocol}:${hop.port}`,
     );
   }
 

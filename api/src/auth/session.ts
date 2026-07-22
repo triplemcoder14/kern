@@ -13,6 +13,10 @@ interface SessionPayload extends AuthUser {
 const SESSION_COOKIE = "kern_session";
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 14;
 
+// const COOKIE_PATH = "/";
+// const COOKIE_SAME_SITE = "Lax";
+// const COOKIE_HTTP_ONLY = "true";
+
 function authSecret(): string {
   return process.env.KERN_AUTH_SECRET ?? "kern-dev-auth-secret-change-me";
 }
@@ -55,11 +59,17 @@ function decodePayload(token: string): SessionPayload | null {
 }
 
 export function createSessionToken(user: AuthUser): string {
-  const payload: SessionPayload = {
+  const issuedAt = Date.now();
+  const expiresAt = issuedAt + SESSION_TTL_MS;
+  return encodePayload({
     ...user,
-    exp: Date.now() + SESSION_TTL_MS,
-  };
-  return encodePayload(payload);
+    exp: expiresAt,
+   })
+  // const payload: SessionPayload = {
+  //   ...user,
+  //   exp: Date.now() + SESSION_TTL_MS,
+  // };
+  // return encodePayload(payload);
 }
 
 export function readSessionToken(cookieHeader: string | undefined): AuthUser | null {

@@ -63,7 +63,13 @@ const DEFAULT_EBPF_URL = "http://127.0.0.1:9474";
 const DEFAULT_K8S_PROXY = "http://127.0.0.1:8001";
 const DEFAULT_ALERT_RULES_NAMESPACE = "kern";
 const DEFAULT_ALERT_RULES_CONFIGMAP = "kern-alert-rules";
-const AGENT_PROFILE_TIMEOUT_MS = 12_000;
+// Previous: 12s — Investigate CPU waited on hung agent/proxy and felt like ~40s with other calls.
+// const AGENT_PROFILE_TIMEOUT_MS = 12_000;
+const AGENT_PROFILE_TIMEOUT_MS = 3_000;
+const PROFILE_CACHE_TTL_MS = 20_000;
+const PROFILE_SOFT_BUDGET_MS = 3_500;
+const AGENT_POD_CACHE_TTL_MS = 30_000;
+const PROFILE_WARM_INTERVAL_MS = 8_000;
 
 function nodeNamesMatch(a?: string, b?: string): boolean {
   if (!a?.trim() || !b?.trim()) {
@@ -129,6 +135,13 @@ export class MonitorRuntime {
   private networkEmitTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingNetworkSnapshot: NetworkSnapshot | null = null;
   private lastSnapshotPersistAt = 0;
+  /** Short-lived node profiles so Investigate CPU / polls don't rebuild from scratch every time. */
+  private profileCache = new Map<string, { at: number; snapshot: ProfileSnapshot }>();
+  private agentPodCache: { at: number; pods: Awaited<ReturnType<typeof listAgentPods>> } | null =
+    null;
+  private profileWarmTimer: ReturnType<typeof setInterval> | null = null;
+  private profileWarmCursor = 0;
+  private knownProfileNodes: string[] = [];
 
   private readonly persistence: MonitorPersistence;
 
@@ -345,6 +358,9 @@ export class MonitorRuntime {
     this.config = null;
     this.client = null;
     this.knownNamespaces = [];
+    this.profileCache.clear();
+    this.agentPodCache = null;
+    this.knownProfileNodes = [];
     await this.persistence.clearConnectionConfig();
     this.emit({ type: "NAMESPACES_UPDATE", namespaces: [] });
     this.emit({ type: "DISCONNECTED" });
@@ -452,6 +468,10 @@ export class MonitorRuntime {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    if (this.profileWarmTimer) {
+      clearInterval(this.profileWarmTimer);
+      this.profileWarmTimer = null;
+    }
     if (!this.connected || !this.client) {
       return;
     }
@@ -460,6 +480,41 @@ export class MonitorRuntime {
       void this.refreshAlertRules();
       void this.refreshNamespaces();
     }, this.podPollIntervalMs());
+
+    // Rotate through nodes so /profile is usually cache-hit when the UI clicks.
+    this.profileWarmTimer = setInterval(() => {
+      void this.warmNextNodeProfile();
+    }, PROFILE_WARM_INTERVAL_MS);
+    void this.warmNextNodeProfile();
+  }
+
+  private async warmNextNodeProfile(): Promise<void> {
+    if (!this.connected || !this.client) {
+      return;
+    }
+    try {
+      let names = this.knownProfileNodes;
+      if (names.length === 0) {
+        names = (await this.client.listNodes().catch(() => [])).map((node) => node.name);
+        this.knownProfileNodes = names;
+      }
+      if (names.length === 0) {
+        return;
+      }
+      const index = this.profileWarmCursor % names.length;
+      this.profileWarmCursor = index + 1;
+      const name = names[index];
+      if (!name) {
+        return;
+      }
+      const cached = this.profileCache.get(name);
+      if (cached && Date.now() - cached.at < PROFILE_CACHE_TTL_MS) {
+        return;
+      }
+      await this.getProfile(name);
+    } catch {
+      // best-effort warm
+    }
   }
 
   private restartWatchersForScope(): void {
@@ -529,6 +584,10 @@ export class MonitorRuntime {
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
+    }
+    if (this.profileWarmTimer) {
+      clearInterval(this.profileWarmTimer);
+      this.profileWarmTimer = null;
     }
     if (this.healthEmitTimer) {
       clearTimeout(this.healthEmitTimer);
@@ -822,6 +881,19 @@ export class MonitorRuntime {
     }, HEALTH_EMIT_MIN_MS);
   }
 
+  private async cachedAgentPods(): Promise<Awaited<ReturnType<typeof listAgentPods>>> {
+    if (!this.client) {
+      return [];
+    }
+    const now = Date.now();
+    if (this.agentPodCache && now - this.agentPodCache.at < AGENT_POD_CACHE_TTL_MS) {
+      return this.agentPodCache.pods;
+    }
+    const pods = await listAgentPods(this.client).catch(() => []);
+    this.agentPodCache = { at: now, pods };
+    return pods;
+  }
+
   private async fetchAgentProfileFromUrl(baseUrl: string): Promise<AgentProfilePayload | null> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), AGENT_PROFILE_TIMEOUT_MS);
@@ -884,29 +956,38 @@ export class MonitorRuntime {
       }
     };
 
+    // Race host-IP + kubectl-proxy for the agent on this node only (3s each, parallel).
+    const attempts: Array<Promise<AgentProfilePayload | null>> = [
+      this.fetchAgentProfileFromUrl(baseUrl),
+    ];
+
     if (this.client) {
-      try {
-        const agentPods = await listAgentPods(this.client);
-        const agentPod = agentPods.find((pod) => nodeNamesMatch(pod.nodeName, nodeName));
-        if (agentPod) {
-          const profile = await this.fetchAgentProfileViaPodProxy(
-            agentPod.namespace,
-            agentPod.name,
-            port,
-          );
-          if (profile) {
-            storeProfile(profile);
-            return profiles;
-          }
-        }
-      } catch {
-        // Fall back to direct agent URL below.
-      }
+      attempts.push(
+        this.cachedAgentPods()
+          .then(async (agentPods) => {
+            const agentPod = agentPods.find((pod) => nodeNamesMatch(pod.nodeName, nodeName));
+            if (!agentPod) {
+              return null;
+            }
+            if (agentPod.hostIP) {
+              const direct = await this.fetchAgentProfileFromUrl(
+                `http://${agentPod.hostIP}:${port}`,
+              );
+              if (direct) {
+                return direct;
+              }
+            }
+            return this.fetchAgentProfileViaPodProxy(agentPod.namespace, agentPod.name, port);
+          })
+          .catch(() => null),
+      );
     }
 
-    const primary = await this.fetchAgentProfileFromUrl(baseUrl);
-    if (primary && nodeNamesMatch(primary.node_name, nodeName)) {
-      storeProfile(primary);
+    const results = await Promise.all(attempts);
+    for (const profile of results) {
+      if (profile && nodeNamesMatch(profile.node_name, nodeName)) {
+        storeProfile(profile);
+      }
     }
 
     return profiles;
@@ -921,35 +1002,114 @@ export class MonitorRuntime {
     }
 
     const selectedNode = nodeName?.trim();
-    const nodeMetrics = await this.client.listNodeMetrics().catch(() => new Map());
+    const cacheKey = selectedNode || "__cluster__";
+    const cached = this.profileCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < PROFILE_CACHE_TTL_MS) {
+      return cached.snapshot;
+    }
 
     if (!selectedNode) {
-      const nodes = await this.client.listNodes().catch(() => []);
-      return buildProfileSnapshot({
+      const [nodeMetrics, nodes, placements] = await Promise.all([
+        this.client.listNodeMetrics().catch(() => new Map()),
+        this.client.listNodes().catch(() => []),
+        this.client.listPodsOnNodes(this.activeNamespace).catch(() => []),
+      ]);
+      const snapshot = buildProfileSnapshot({
         nodes,
-        pods: [],
+        pods: placements,
         network: this.networkEngine.getSnapshot(),
         events: this.events,
         agentProfiles: new Map(),
         nodeMetrics,
         podMetrics: [],
       });
+      this.profileCache.set(cacheKey, { at: Date.now(), snapshot });
+      return snapshot;
     }
 
-    const [nodesResult, pods, agentProfiles, podMetrics, podStats] = await Promise.all([
-      this.client.listNodes().catch(() => []),
-      this.client.listPodsOnNode(selectedNode, this.activeNamespace).catch(() => []),
-      this.fetchAgentProfilesForNode(selectedNode),
-      this.client.listPodMetrics(this.activeNamespace).catch(() => []),
-      this.client.listNodePodMemoryStats(selectedNode).catch(() => []),
+    // Fast core (nodes/pods/metrics) must not wait on agent/kubelet — those often hang.
+    // Cap each K8s call so a single slow list can't stall Investigate CPU for ~30–40s.
+    const withBudget = async <T,>(promise: Promise<T>, fallback: T, ms = 2_500): Promise<T> =>
+      Promise.race([
+        promise,
+        new Promise<T>((resolve) => {
+          setTimeout(() => resolve(fallback), ms);
+        }),
+      ]);
+
+    const corePromise = Promise.all([
+      withBudget(this.client.listNodeMetrics().catch(() => new Map()), new Map()),
+      withBudget(this.client.listNodes().catch(() => []), []),
+      withBudget(
+        this.client.listPodsOnNode(selectedNode, this.activeNamespace).catch(() => []),
+        [],
+      ),
+      withBudget(this.client.listPodMetrics(this.activeNamespace).catch(() => []), []),
+      // Placements are nice-to-have for auto-select; don't block first paint.
+      withBudget(
+        this.client.listPodsOnNodes(this.activeNamespace).catch(() => []),
+        [],
+        2_000,
+      ),
     ]);
+
+    const enrichPromise = Promise.all([
+      this.fetchAgentProfilesForNode(selectedNode),
+      withBudget(this.client.listNodePodMemoryStats(selectedNode).catch(() => []), [], 2_500),
+    ]);
+
+    const budget = new Promise<"budget">((resolve) => {
+      setTimeout(() => resolve("budget"), PROFILE_SOFT_BUDGET_MS);
+    });
+
+    const core = await corePromise;
+    const [nodeMetrics, nodesResult, pods, podMetrics, placements] = core;
+
+    let agentProfiles = new Map<string, AgentProfilePayload>();
+    let podStats: Awaited<ReturnType<K8sApiClient["listNodePodMemoryStats"]>> = [];
+
+    const enrichOrBudget = await Promise.race([
+      enrichPromise.then((value) => ({ kind: "enrich" as const, value })),
+      budget.then(() => ({ kind: "budget" as const })),
+    ]);
+
+    if (enrichOrBudget.kind === "enrich") {
+      agentProfiles = enrichOrBudget.value[0];
+      podStats = enrichOrBudget.value[1];
+    } else {
+      // Soft budget hit — return metrics-based profile now; finish enrich in background for cache.
+      void enrichPromise
+        .then(([profiles, stats]) => {
+          let nodes = nodesResult;
+          if (nodes.length === 0) {
+            nodes = deriveNodesFromPods(pods);
+          }
+          const snapshot = buildProfileSnapshot({
+            nodes,
+            pods,
+            network: this.networkEngine.getSnapshot(),
+            events: this.events,
+            agentProfiles: profiles,
+            nodeMetrics,
+            podMetrics,
+            podStats: stats,
+            selectedNode,
+            podPlacements: placements.length > 0 ? placements : pods,
+          });
+          this.profileCache.set(cacheKey, { at: Date.now(), snapshot });
+        })
+        .catch(() => undefined);
+    }
 
     let nodes = nodesResult;
     if (nodes.length === 0) {
       nodes = deriveNodesFromPods(pods);
     }
+    if (nodes.length > 0) {
+      this.knownProfileNodes = nodes.map((node) => node.name);
+    }
 
-    return buildProfileSnapshot({
+    const snapshot = buildProfileSnapshot({
       nodes,
       pods,
       network: this.networkEngine.getSnapshot(),
@@ -959,6 +1119,9 @@ export class MonitorRuntime {
       podMetrics,
       podStats,
       selectedNode,
+      podPlacements: placements.length > 0 ? placements : pods,
     });
+    this.profileCache.set(cacheKey, { at: Date.now(), snapshot });
+    return snapshot;
   }
 }

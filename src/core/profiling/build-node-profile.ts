@@ -134,16 +134,22 @@ function enrichPodWithMetrics(
   metricsByKey: Map<string, K8sPodMetricSummary>,
   statsByKey: Map<string, K8sPodMemoryStat>,
   limitByKey: Map<string, number | undefined>,
+  cpuCores?: number,
 ): PodConsumer {
   const key = `${pod.namespace}/${pod.pod}`;
   const metric = metricsByKey.get(key);
   const stats = statsByKey.get(key);
   const metricsMb = kiToMb(metric?.memoryUsedKi);
   const limitMb = pod.memoryLimitMb ?? limitByKey.get(key);
+  const metricsCpu = cpuPercentFromPodMetric(metric, cpuCores);
 
   let rssMb = pod.rssMb ?? stats?.rssMb;
   let workingSetMb = pod.workingSetMb ?? stats?.workingSetMb ?? metricsMb;
   let rssSource: MemoryRssSource | undefined = pod.rssSource;
+  // Inventory pods were previously merged with cpuPercent: 0 even when metrics-server
+  // had usage — prefer agent/process CPU, then metrics.
+  const cpuPercent =
+    (pod.cpuPercent ?? 0) > 0 ? pod.cpuPercent : (metricsCpu ?? pod.cpuPercent);
 
   if (rssMb === undefined && workingSetMb !== undefined) {
     rssMb = workingSetMb;
@@ -170,7 +176,18 @@ function enrichPodWithMetrics(
     workingSetMb,
     memoryLimitMb: limitMb,
     rssSource,
+    cpuPercent,
   };
+}
+
+function cpuPercentFromPodMetric(
+  metric: K8sPodMetricSummary | undefined,
+  cpuCores?: number,
+): number | undefined {
+  if (!metric?.cpuUsageNano || !cpuCores || cpuCores <= 0) {
+    return undefined;
+  }
+  return Math.min(100, (metric.cpuUsageNano / (cpuCores * 1_000_000_000)) * 100);
 }
 
 /** Prefer agent cgroup pods; fall back to attributed processes, then kubelet stats / metrics inventory. Never invent equal shares. */
@@ -182,6 +199,7 @@ function resolveMemoryConsumers(
   podStats: K8sPodMemoryStat[],
   memoryUsedMb: number | undefined,
   nodeName: string,
+  cpuCores?: number,
 ): PodConsumer[] {
   const metricsByKey = new Map<string, K8sPodMetricSummary>(
     podMetrics.map((metric) => [`${metric.namespace}/${metric.name}`, metric]),
@@ -196,14 +214,55 @@ function resolveMemoryConsumers(
   const sortByRss = (items: PodConsumer[]) =>
     [...items].sort((a, b) => (b.workingSetMb ?? b.rssMb ?? 0) - (a.workingSetMb ?? a.rssMb ?? 0));
 
-  const enrich = (pod: PodConsumer) => enrichPodWithMetrics(pod, metricsByKey, statsByKey, limitByKey);
+  const enrich = (pod: PodConsumer) =>
+    enrichPodWithMetrics(pod, metricsByKey, statsByKey, limitByKey, cpuCores);
 
+  // if (agentPods.length > 0) {
+  //   return attachGrowth(
+  //     sortByRss(agentPods.map(enrich)).slice(0, 16),
+  //     (pod) => `pod:${pod.namespace}/${pod.pod}`,
+  //     (pod) => pod.workingSetMb ?? pod.rssMb,
+  //   );
+  // }
   if (agentPods.length > 0) {
-    return attachGrowth(
-      sortByRss(agentPods.map(enrich)).slice(0, 16),
-      (pod) => `pod:${pod.namespace}/${pod.pod}`,
-      (pod) => pod.workingSetMb ?? pod.rssMb,
-    );
+    // Union agent pods with node inventory so name→workload resolution works
+    // even when PID→pod attribution is missing.
+    const merged = new Map<string, PodConsumer>();
+    for (const pod of agentPods) {
+      if (!pod.namespace || !pod.pod || pod.namespace === "node") {
+        continue;
+      }
+      merged.set(`${pod.namespace}/${pod.pod}`, pod);
+    }
+    for (const pod of inventory) {
+      const key = `${pod.namespace}/${pod.name}`;
+      if (merged.has(key)) {
+        continue;
+      }
+      const stats = statsByKey.get(key);
+      const metric = metricsByKey.get(key);
+      const metricsMb = kiToMb(metric?.memoryUsedKi);
+      merged.set(key, {
+        namespace: pod.namespace,
+        pod: pod.name,
+        rssMb: stats?.rssMb ?? metricsMb,
+        workingSetMb: stats?.workingSetMb ?? metricsMb ?? stats?.rssMb,
+        memoryLimitMb: pod.memoryLimitMb,
+        // Was hardcoded 0 — left blank so enrich can fill from metrics-server.
+        // cpuPercent: 0,
+        cpuPercent: cpuPercentFromPodMetric(metric, cpuCores),
+        rssSource: (stats?.rssMb !== undefined || metricsMb !== undefined
+          ? "metrics"
+          : "unknown") as MemoryRssSource,
+      });
+    }
+    if (merged.size > 0) {
+      return attachGrowth(
+        sortByRss([...merged.values()].map(enrich)).slice(0, 16),
+        (pod) => `pod:${pod.namespace}/${pod.pod}`,
+        (pod) => pod.workingSetMb ?? pod.rssMb,
+      );
+    }
   }
 
   const byPod = new Map<string, PodConsumer>();
@@ -223,6 +282,27 @@ function resolveMemoryConsumers(
     current.cpuPercent = (current.cpuPercent ?? 0) + (proc.cpuPercent ?? 0);
     byPod.set(key, current);
   }
+  for (const pod of inventory) {
+    const key = `${pod.namespace}/${pod.name}`;
+    if (byPod.has(key)) {
+      continue;
+    }
+    const stats = statsByKey.get(key);
+    const metric = metricsByKey.get(key);
+    const metricsMb = kiToMb(metric?.memoryUsedKi);
+    byPod.set(key, {
+      namespace: pod.namespace,
+      pod: pod.name,
+      rssMb: stats?.rssMb ?? metricsMb,
+      workingSetMb: stats?.workingSetMb ?? metricsMb ?? stats?.rssMb,
+      memoryLimitMb: pod.memoryLimitMb,
+      // cpuPercent: 0,
+      cpuPercent: cpuPercentFromPodMetric(metric, cpuCores),
+      rssSource: (stats?.rssMb !== undefined || metricsMb !== undefined
+        ? "metrics"
+        : "unknown") as MemoryRssSource,
+    });
+  }
   if (byPod.size > 0) {
     return attachGrowth(
       sortByRss([...byPod.values()].map(enrich)).slice(0, 16),
@@ -231,32 +311,10 @@ function resolveMemoryConsumers(
     );
   }
 
-  // Inventory + kubelet stats / metrics-server — real per-pod values, never nodeUsed/N.
-  if (inventory.length > 0) {
-    const fromInventory = inventory.map((pod) => {
-      const key = `${pod.namespace}/${pod.name}`;
-      const stats = statsByKey.get(key);
-      const metric = metricsByKey.get(key);
-      const metricsMb = kiToMb(metric?.memoryUsedKi);
-      const rssMb = stats?.rssMb ?? metricsMb;
-      const workingSetMb = stats?.workingSetMb ?? metricsMb ?? stats?.rssMb;
-      return {
-        namespace: pod.namespace,
-        pod: pod.name,
-        rssMb,
-        workingSetMb,
-        memoryLimitMb: pod.memoryLimitMb,
-        rssSource: (rssMb !== undefined || workingSetMb !== undefined
-          ? "metrics"
-          : "unknown") as MemoryRssSource,
-      };
-    });
-    return attachGrowth(
-      sortByRss(fromInventory).slice(0, 16),
-      (pod) => `pod:${pod.namespace}/${pod.pod}`,
-      (pod) => pod.workingSetMb ?? pod.rssMb,
-    );
-  }
+  // if (inventory.length > 0) {
+  //   const fromInventory = inventory.map((pod) => { ... });
+  //   return attachGrowth(sortByRss(fromInventory).slice(0, 16), ...);
+  // }
 
   const hostProcs = processes
     .filter((proc) => (proc.rssMb ?? 0) > 0)
@@ -409,6 +467,8 @@ interface PodOnNode {
   name: string;
   nodeName: string;
   memoryLimitMb?: number;
+  /** Controllers via ownerReferences (Deployment / STS / DS). */
+  ownerWorkload?: string;
 }
 
 function normalizeHealth(value?: string): NodeHealth {
@@ -993,6 +1053,7 @@ function buildDetail(
     podStats,
     agent?.memory_used_mb,
     node.name,
+    agent?.cpu_cores ?? node.cpuCores,
   );
   const topContainers = resolveContainerConsumers(inventoryPods, podMetrics, podStats);
   const kernelHotspots = mapKernelHotspots(agent);
@@ -1099,13 +1160,21 @@ export function buildProfileSnapshot(input: {
   podMetrics?: K8sPodMetricSummary[];
   podStats?: K8sPodMemoryStat[];
   selectedNode?: string;
+  /** Optional cluster-wide schedule map (falls back to `pods`). */
+  podPlacements?: PodOnNode[];
 }): ProfileSnapshot {
   const podMap = podsOnNodeMap(input.pods);
-  const agentProfiles = input.agentProfiles ?? new Map<string, AgentProfilePayload>();
-  const nodeMetrics = input.nodeMetrics ?? new Map<string, K8sNodeResourceMetrics>();
+  const agentProfiles = input.agentProfiles ?? new Map();
+  const nodeMetrics = input.nodeMetrics ?? new Map();
   const podMetrics = input.podMetrics ?? [];
-  const podStats = input.podStats ?? [];  const summaries: NodeProfileSummary[] = input.nodes.map((node) => {
-    const nodeFlows = flowsForNode(input.network.flows, podMap.get(node.name) ?? new Set());
+  const podStats = input.podStats ?? [];
+  const placementSource = input.podPlacements ?? input.pods;
+  const placementMap = podsOnNodeMap(placementSource);
+  const summaries: NodeProfileSummary[] = input.nodes.map((node) => {
+    const nodeFlows = flowsForNode(
+      input.network.flows,
+      placementMap.get(node.name) ?? podMap.get(node.name) ?? new Set(),
+    );
     const { agent, agentLive } = resolveAgentForNode(node, agentProfiles, nodeMetrics);
     const metrics = networkMetrics(nodeFlows, agent?.network);
     const health = agent?.health
@@ -1146,16 +1215,23 @@ export function buildProfileSnapshot(input: {
   let selected: NodeProfileDetail | undefined;
 
   if (selectedRow) {
-    const nodeFlows = flowsForNode(input.network.flows, podMap.get(selectedRow.name) ?? new Set());
-    const { agent, agentLive } = resolveAgentForNode(selectedRow, agentProfiles, nodeMetrics);
     const inventory = input.pods.filter((pod) => pod.nodeName === selectedRow.name);
+    const inventoryOrPlacement =
+      inventory.length > 0
+        ? inventory
+        : placementSource.filter((pod) => pod.nodeName === selectedRow.name);
+    const nodeFlows = flowsForNode(
+      input.network.flows,
+      placementMap.get(selectedRow.name) ?? podMap.get(selectedRow.name) ?? new Set(),
+    );
+    const { agent, agentLive } = resolveAgentForNode(selectedRow, agentProfiles, nodeMetrics);
     selected = buildDetail(
       selectedRow,
       nodeFlows,
       input.events,
       agent,
       agentLive,
-      inventory,
+      inventoryOrPlacement,
       podMetrics,
       podStats,
     );
@@ -1164,6 +1240,16 @@ export function buildProfileSnapshot(input: {
   return {
     nodes: summaries,
     selected,
+    // Previous: no cluster-wide placement map — profiler couldn't auto-pick the workload's node.
+    // podPlacements: input.pods.filter(...).map(...),
+    podPlacements: placementSource
+      .filter((pod) => pod.nodeName)
+      .map((pod) => ({
+        namespace: pod.namespace,
+        name: pod.name,
+        nodeName: pod.nodeName,
+        ownerWorkload: pod.ownerWorkload,
+      })),
     updatedAt: new Date().toISOString(),
   };
 }

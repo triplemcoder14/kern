@@ -2,8 +2,30 @@ import { useMemo, useState } from "react";
 import type { MonitorEvent, MonitorSeverity, NetworkTalkKind } from "../../core/types/monitoring";
 import { unlockAlertSound } from "../lib/alert-sound";
 import { PageContextBar } from "./PageContextBar";
+import type { InvestigationFocus } from "../investigation/types";
+import {
+  investigationLabel,
+  investigationWindowMs,
+} from "../investigation/types";
 
 type SourceFilter = "all" | "kubernetes" | "network" | "degradation";
+
+function eventInvolvesFocus(event: MonitorEvent, focus: InvestigationFocus): boolean {
+  const names = [focus.name, ...(focus.memberPods ?? [])];
+  if (event.resourceName && names.some((name) => event.resourceName === name || event.resourceName?.startsWith(`${name}-`))) {
+    return true;
+  }
+  const haystack = `${event.title} ${event.message} ${event.resourceName ?? ""}`.toLowerCase();
+  return names.some((name) => haystack.includes(name.toLowerCase()));
+}
+
+function eventWithinWindow(event: MonitorEvent, focus: InvestigationFocus, now = Date.now()): boolean {
+  const ts = Date.parse(event.timestamp);
+  if (!Number.isFinite(ts)) {
+    return true;
+  }
+  return now - ts <= investigationWindowMs(focus.window);
+}
 
 function isServiceTalkIssue(event: MonitorEvent): boolean {
   if (!event.networkTalk) {
@@ -67,6 +89,7 @@ interface LiveEventStreamProps {
   onPausedChange: (value: boolean) => void;
   soundMuted: boolean;
   onSoundMutedChange: (muted: boolean) => void;
+  investigation?: InvestigationFocus | null;
 }
 
 export function LiveEventStream({
@@ -80,6 +103,7 @@ export function LiveEventStream({
   onPausedChange,
   soundMuted,
   onSoundMutedChange,
+  investigation = null,
 }: LiveEventStreamProps) {
   const [search, setSearch] = useState("");
   const [severityFilter, setSeverityFilter] = useState<MonitorSeverity | "all">("all");
@@ -98,15 +122,19 @@ export function LiveEventStream({
         (sourceFilter === "degradation" && isServiceTalkIssue(event)) ||
         (sourceFilter === "kubernetes" && !event.networkTalk);
       const query = search.trim().toLowerCase();
+      const focusMatch =
+        !investigation ||
+        (eventInvolvesFocus(event, investigation) && eventWithinWindow(event, investigation));
       const searchMatch =
         !query ||
         event.title.toLowerCase().includes(query) ||
         event.message.toLowerCase().includes(query) ||
         event.resourceName?.toLowerCase().includes(query) ||
         event.networkTalk?.path.toLowerCase().includes(query);
-      return nsMatch && severityMatch && sourceMatch && searchMatch;
+      // return nsMatch && severityMatch && sourceMatch && searchMatch;
+      return nsMatch && severityMatch && sourceMatch && searchMatch && focusMatch;
     });
-  }, [events, namespaceFilter, severityFilter, sourceFilter, search]);
+  }, [events, namespaceFilter, severityFilter, sourceFilter, search, investigation]);
 
   const counts = useMemo(() => {
     const base = events.filter(
@@ -131,10 +159,16 @@ export function LiveEventStream({
     <div className="events-page">
       <header className="events-header">
         <div>
-          <h1 className="events-title">Live Event Stream</h1>
+          {/* <h1 className="events-title">Live Event Stream</h1> */}
+          <h1 className="events-title">
+            {investigation
+              ? `Timeline · ${investigationLabel(investigation)}`
+              : "Live Event Stream"}
+          </h1>
           <p className="events-sub">
-            Pod ↔ service talk from kernel flows — use Degradation for timeouts, drops, and path
-            worsening
+            {investigation
+              ? `Only events involving ${investigationLabel(investigation)}`
+              : "Pod ↔ service talk from kernel flows — use Degradation for timeouts, drops, and path worsening"}
           </p>
         </div>
         <div className="events-header-right">

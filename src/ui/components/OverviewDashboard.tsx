@@ -4,9 +4,11 @@ import { buildGraphLayout, type GraphLod } from "../../core/network/graph-model"
 import { buildOverviewStats } from "../../core/network/network-insights";
 import type { ClusterHealthSnapshot, Incident, MonitorEvent } from "../../core/types/monitoring";
 import type { EbpfCollectorStatus, NetworkSnapshot } from "../../core/types/network";
+import { useInvestigationLayout } from "../hooks/useInvestigationLayout";
 import type { NavId, NavPage } from "./AppShell";
 import { PageHeader } from "./PageHeader";
 import { TopologyGraph } from "./TopologyGraph";
+import type { StartInvestigation } from "../investigation/types";
 
 interface OverviewDashboardProps {
   health: ClusterHealthSnapshot;
@@ -19,6 +21,7 @@ interface OverviewDashboardProps {
   onNamespaceChange: (value: string) => void;
   connected: boolean;
   onNavigate: (nav: NavId, page: NavPage) => void;
+  onStartInvestigation?: StartInvestigation;
 }
 
 function relativeTime(timestamp: string): string {
@@ -233,6 +236,7 @@ export function OverviewDashboard({
   onNamespaceChange,
   connected,
   onNavigate,
+  onStartInvestigation,
 }: OverviewDashboardProps) {
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -242,10 +246,12 @@ export function OverviewDashboard({
     () => filterNetworkSnapshot(snapshot, namespace),
     [snapshot, namespace],
   );
-  const layout = useMemo(
+  const liveLayout = useMemo(
     () => buildGraphLayout(scoped.topology, scoped.flows, { lod }),
     [scoped.topology, scoped.flows, lod],
   );
+  const investigating = selectedNodeId != null || selectedEdgeId != null;
+  const layout = useInvestigationLayout(liveLayout, investigating, lod);
   const stats = useMemo(() => buildOverviewStats(scoped, layout.edges), [scoped, layout.edges]);
   const ribbon = useMemo(
     () => buildHealthRibbon(health, stats, snapshot.ebpf),
@@ -342,6 +348,8 @@ export function OverviewDashboard({
               showLegend
               showInspectPanel
               onNavigate={onNavigate}
+              onStartInvestigation={onStartInvestigation}
+              startedFrom="Overview"
             />
           </div>
         </div>
